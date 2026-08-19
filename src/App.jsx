@@ -9,13 +9,13 @@ import {
   LayoutDashboard, List, PiggyBank, Repeat, Users, Zap, Power,
   CalendarDays, ChevronLeft, ChevronRight, Target, BarChart3, Sparkles,
   Landmark, Banknote, CreditCard, CircleDollarSign, HandCoins, Pencil, Check,
-  Moon, Sun, Palette
+  Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag
 } from "lucide-react";
 
 /* ---------- design tokens ---------- */
 
 const SHADOW = "0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06)";
-const DEFAULT_THEME = { mode: "light", accent: "#10B981" };
+const DEFAULT_THEME = { mode: "light", accent: "#10B981", secondaryAccent: "#3B82F6" };
 const ACCENT_PRESETS = ["#10B981", "#3B82F6", "#8B5CF6", "#F43F5E", "#F59E0B", "#14B8A6", "#6366F1", "#EC4899"];
 
 function hexToRgb(hex) {
@@ -37,7 +37,7 @@ function withAlpha(hex, alphaHex) {
   return hex + alphaHex;
 }
 
-function buildPalette(mode, accent) {
+function buildPalette(mode, accent, secondaryAccent) {
   const isDark = mode === "dark";
   const base = isDark
     ? { bg: "#0F1115", card: "#181B21", border: "#272B33", text: "#F3F4F6", muted: "#9199A8", mutedLight: "#5B6270" }
@@ -53,12 +53,12 @@ function buildPalette(mode, accent) {
     green: "#16A34A", greenLight: tint("#16A34A"),
     rose: "#EF4444", roseLight: tint("#EF4444"),
     amber: "#F59E0B", amberLight: tint("#F59E0B"),
-    blue: "#3B82F6", blueLight: tint("#3B82F6"),
+    blue: secondaryAccent, blueLight: tint(secondaryAccent),
     purple: "#8B5CF6", purpleLight: tint("#8B5CF6"),
   };
 }
 
-let COLORS = buildPalette(DEFAULT_THEME.mode, DEFAULT_THEME.accent);
+let COLORS = buildPalette(DEFAULT_THEME.mode, DEFAULT_THEME.accent, DEFAULT_THEME.secondaryAccent);
 
 /* ---------- constants ---------- */
 
@@ -142,6 +142,13 @@ function shiftAnchor(periodType, anchor, dir) {
   if (periodType === "weekly") return addDays(anchor, dir * 7);
   return addMonths(anchor, dir);
 }
+function greetingWord() {
+  const h = new Date().getHours();
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 function relDateLabel(dateStr) {
   if (dateStr === todayISO()) return "Today";
   const y = addDays(new Date(), -1);
@@ -196,7 +203,8 @@ function emptyData() {
   return {
     entries: [], budgets: {}, recurring: [], masterBudgets: {}, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
     categories: { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
-    theme: { ...DEFAULT_THEME }
+    theme: { ...DEFAULT_THEME },
+    profile: { name: "" }
   };
 }
 function normalizeBudgets(raw) {
@@ -215,6 +223,7 @@ export default function FinanceTracker() {
   const [tab, setTab] = useState("dashboard");
   const [preset, setPreset] = useState({ type: null, token: 0 });
   const [openGroup, setOpenGroup] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   const toastTimers = useRef({});
 
@@ -252,7 +261,8 @@ export default function FinanceTracker() {
             accounts: parsed.accounts || [],
             quickAdds: parsed.quickAdds || QUICK_ADD_DEFAULTS,
             categories: parsed.categories || { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
-            theme: parsed.theme || { ...DEFAULT_THEME }
+            theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
+            profile: parsed.profile || { name: "" }
           });
         }
       } catch (e) { /* nothing saved yet */ }
@@ -315,6 +325,12 @@ export default function FinanceTracker() {
 
   const addEntry = (entry) => {
     setData((prev) => ({ ...prev, entries: [...prev.entries, { id: uid(), createdAt: Date.now(), ...entry }] }));
+    if (entry.type === "transfer") {
+      const fromName = data.accounts.find((a) => a.id === entry.fromAccountId)?.name || "account";
+      const toName = data.accounts.find((a) => a.id === entry.toAccountId)?.name || "account";
+      pushToast(`Transferred ${fmt(entry.amount)} — ${fromName} → ${toName}`, "info", ArrowRightLeft);
+      return;
+    }
     const label = entry.categoryLabel || entry.note || entry.category;
     if (entry.type === "income") pushToast(`Income added — ${fmt(entry.amount)}${label ? " · " + label : ""}`, "success", TrendingUp);
     else pushToast(`Expense added — ${fmt(entry.amount)}${label ? " · " + label : ""}`, "info", TrendingDown);
@@ -322,6 +338,10 @@ export default function FinanceTracker() {
   const removeEntry = (id) => {
     setData((prev) => ({ ...prev, entries: prev.entries.filter((e) => e.id !== id) }));
     pushToast("Transaction deleted", "danger", Trash2);
+  };
+  const updateEntry = (id, patch) => {
+    setData((prev) => ({ ...prev, entries: prev.entries.map((e) => e.id === id ? { ...e, ...patch } : e) }));
+    pushToast("Transaction updated", "info", Pencil);
   };
 
   const setDebtSettled = (entryId, debtId, settled) => {
@@ -429,6 +449,35 @@ export default function FinanceTracker() {
     if (!exists) pushToast(`Category "${name}" added`, "success", Check);
   };
 
+  const renameCategory = (type, oldName, newName) => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    setData((prev) => {
+      const list = [...new Set(prev.categories[type].map((c) => c === oldName ? trimmed : c))];
+      const entries = prev.entries.map((e) => e.type === type && e.category === oldName ? { ...e, category: trimmed } : e);
+      const recurring = prev.recurring.map((r) => r.type === type && r.category === oldName ? { ...r, category: trimmed } : r);
+      const quickAdds = type === "expense" ? prev.quickAdds.map((q) => q.category === oldName ? { ...q, category: trimmed } : q) : prev.quickAdds;
+      let budgets = prev.budgets;
+      if (type === "expense" && prev.budgets[oldName]) {
+        budgets = { ...prev.budgets };
+        const val = budgets[oldName];
+        delete budgets[oldName];
+        budgets[trimmed] = { ...(budgets[trimmed] || {}), ...val };
+      }
+      return { ...prev, categories: { ...prev.categories, [type]: list }, entries, recurring, quickAdds, budgets };
+    });
+    pushToast(`Renamed "${oldName}" to "${trimmed}"`, "success", Pencil);
+  };
+
+  const deleteCategory = (type, name) => {
+    if ((data.categories[type] || []).length <= 1) {
+      pushToast("You need at least one category", "danger", Trash2);
+      return;
+    }
+    setData((prev) => ({ ...prev, categories: { ...prev.categories, [type]: prev.categories[type].filter((c) => c !== name) } }));
+    pushToast(`Category "${name}" removed`, "danger", Trash2);
+  };
+
   const goAdd = (type) => { setPreset({ type, token: Date.now() }); setTab("add"); };
 
   const setTheme = (patch) => {
@@ -436,12 +485,14 @@ export default function FinanceTracker() {
     if (patch.mode) pushToast(`${patch.mode === "dark" ? "Dark" : "Light"} mode enabled`, "success", patch.mode === "dark" ? Moon : Sun);
   };
 
+  const setProfile = (patch) => setData((prev) => ({ ...prev, profile: { ...prev.profile, ...patch } }));
+
   // Recompute the shared color palette synchronously during render so every
   // child (which reads the module-level COLORS object) sees the new theme
   // the moment it renders, without needing to thread it through props.
   useMemo(() => {
-    Object.assign(COLORS, buildPalette(data.theme.mode, data.theme.accent));
-  }, [data.theme.mode, data.theme.accent]);
+    Object.assign(COLORS, buildPalette(data.theme.mode, data.theme.accent, data.theme.secondaryAccent));
+  }, [data.theme.mode, data.theme.accent, data.theme.secondaryAccent]);
 
   const NAV = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -474,13 +525,30 @@ export default function FinanceTracker() {
     <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100%", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
       <GlobalStyle />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} NAV={NAV} tab={tab} setTab={setTab} profileName={data.profile.name} />
       <div style={{ maxWidth: 860, margin: "0 auto" }}>
-        <div style={{ marginBottom: 18 }}>
-          <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>Finance</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>Personal Finance Tracker</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+          <button className="mobile-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu" style={{
+            background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 9, cursor: "pointer", color: COLORS.text, boxShadow: SHADOW
+          }}>
+            <Menu size={18} />
+          </button>
+          <div>
+            {data.profile.name ? (
+              <>
+                <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>{greetingWord()}</div>
+                <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>{data.profile.name} 👋</h1>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>Finance</div>
+                <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>Personal Finance Tracker</h1>
+              </>
+            )}
+          </div>
         </div>
 
-        <nav ref={navRef} style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 22 }}>
+        <nav ref={navRef} className="nav-top-bar" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 22 }}>
           {NAV.map((item) => item.children ? (
             <div key={item.group} style={{ position: "relative" }}>
               <button onClick={() => setOpenGroup(openGroup === item.group ? null : item.group)}
@@ -508,6 +576,7 @@ export default function FinanceTracker() {
             </button>
           ))}
         </nav>
+
 
         <div key={tab} className="tab-panel">
           {tab === "dashboard" && (
@@ -537,8 +606,8 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} categories={data.categories} />}
-          {tab === "periods" && <Periods entries={data.entries} />}
+          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} categories={data.categories} accounts={data.accounts} onAddCategory={addCategory} />}
+          {tab === "periods" && <Periods entries={data.entries} accounts={data.accounts} />}
           {tab === "insights" && <Insights entries={data.entries} accounts={data.accounts} />}
           {tab === "budgets" && (
             <Budgets
@@ -564,7 +633,19 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "settings" && <Settings theme={data.theme} onSetTheme={setTheme} />}
+          {tab === "settings" && (
+            <Settings
+              theme={data.theme}
+              onSetTheme={setTheme}
+              profile={data.profile}
+              onSetProfile={setProfile}
+              categories={data.categories}
+              entries={data.entries}
+              onRenameCategory={renameCategory}
+              onDeleteCategory={deleteCategory}
+              onAddCategory={addCategory}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -579,7 +660,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
 
   const totals = useMemo(() => {
     const accountFloor = accounts.reduce((s, a) => s + a.initialBalance, 0);
-    const balance = accountFloor + entries.reduce((s, e) => s + (e.type === "income" ? e.amount : -e.amount), 0);
+    const balance = accountFloor + entries.reduce((s, e) => e.type === "transfer" ? s : s + (e.type === "income" ? e.amount : -e.amount), 0);
     const range = periodRange(statScope === "week" ? "weekly" : "monthly", new Date());
     const scoped = entries.filter((e) => e.date >= range.start && e.date <= range.end);
     const income = scoped.filter((e) => e.type === "income").reduce((s, e) => s + e.amount, 0);
@@ -740,7 +821,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
 
       <SectionCard title="Recent Transactions">
         {recent.length === 0 && <EmptyNote>No transactions yet — add your first one above.</EmptyNote>}
-        {recent.map((e, i) => <TxRow key={e.id} e={e} last={i === recent.length - 1} />)}
+        {recent.map((e, i) => <TxRow key={e.id} e={e} last={i === recent.length - 1} accounts={accounts} />)}
       </SectionCard>
     </div>
   );
@@ -826,12 +907,20 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove }) {
   const balanceFor = (accountId) => {
     const acc = accounts.find((a) => a.id === accountId);
     if (!acc) return 0;
-    const net = entries.filter((e) => e.accountId === accountId).reduce((s, e) => s + (e.type === "income" ? e.amount : -e.amount), 0);
+    let net = 0;
+    entries.forEach((e) => {
+      if (e.type === "transfer") {
+        if (e.fromAccountId === accountId) net -= e.amount;
+        if (e.toAccountId === accountId) net += e.amount;
+      } else if (e.accountId === accountId) {
+        net += e.type === "income" ? e.amount : -e.amount;
+      }
+    });
     return acc.initialBalance + net;
   };
 
   const unassignedNet = useMemo(() => (
-    entries.filter((e) => !e.accountId).reduce((s, e) => s + (e.type === "income" ? e.amount : -e.amount), 0)
+    entries.filter((e) => e.type !== "transfer" && !e.accountId).reduce((s, e) => s + (e.type === "income" ? e.amount : -e.amount), 0)
   ), [entries]);
 
   const totalAcrossAccounts = accounts.reduce((s, a) => s + balanceFor(a.id), 0) + unassignedNet;
@@ -1090,14 +1179,20 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   const [shared, setShared] = useState(false);
   const [sharedTotal, setSharedTotal] = useState("");
   const [debtors, setDebtors] = useState([]);
+  const [transferFrom, setTransferFrom] = useState("");
+  const [transferTo, setTransferTo] = useState("");
   const [error, setError] = useState("");
   const [editingQuickAdds, setEditingQuickAdds] = useState(false);
 
   useEffect(() => {
-    if (accounts.length > 0) setForm((f) => f.accountId ? f : { ...f, accountId: accounts[0].id });
+    if (accounts.length > 0) {
+      setForm((f) => f.accountId ? f : { ...f, accountId: accounts[0].id });
+      setTransferFrom((v) => v || accounts[0].id);
+      setTransferTo((v) => v || (accounts[1] ? accounts[1].id : ""));
+    }
   }, [accounts]);
 
-  const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : categories.income[0] }));
+  const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : type === "income" ? categories.income[0] : f.category }));
 
   useEffect(() => {
     if (preset && preset.type) switchType(preset.type);
@@ -1126,6 +1221,19 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     let note = form.note.trim();
     let debtsPayload = null;
     let debtsTotal = null;
+
+    if (form.type === "transfer") {
+      amount = parseFloat(form.amount);
+      if (!amount || amount <= 0) { setError("Enter an amount greater than zero."); return; }
+      if (!transferFrom || !transferTo) { setError("Choose both a from and to account."); return; }
+      if (transferFrom === transferTo) { setError("Pick two different accounts."); return; }
+      if (!form.date) { setError("Pick a date."); return; }
+      setError("");
+      onAdd({ type: "transfer", amount, fromAccountId: transferFrom, toAccountId: transferTo, note, date: form.date });
+      setForm((f) => ({ ...f, amount: "", note: "" }));
+      return;
+    }
+
     if (shared) {
       const total = parseFloat(sharedTotal);
       if (!total || total <= 0) { setError("Enter the total cost."); return; }
@@ -1177,7 +1285,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
 
       <SectionCard title="New Transaction">
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-          {["expense", "income"].map((t) => (
+          {["expense", "income", "transfer"].map((t) => (
             <button key={t} onClick={() => switchType(t)} style={{
               flex: 1, padding: "9px 12px", borderRadius: 10, border: "1px solid " + (form.type === t ? COLORS.orange : COLORS.border),
               background: form.type === t ? COLORS.orangeLight : COLORS.card,
@@ -1199,17 +1307,42 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
             <FieldLabel>Date</FieldLabel>
             <input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }} />
           </div>
-          <div>
-            <FieldLabel>Category</FieldLabel>
-            <CategorySelect value={form.category} onChange={(c) => setForm((f) => ({ ...f, category: c }))}
-              options={form.type === "expense" ? categories.expense : categories.income} type={form.type} onAddCategory={onAddCategory} />
-          </div>
+
+          {form.type !== "transfer" && (
+            <div>
+              <FieldLabel>Category</FieldLabel>
+              <CategorySelect value={form.category} onChange={(c) => setForm((f) => ({ ...f, category: c }))}
+                options={form.type === "expense" ? categories.expense : categories.income} type={form.type} onAddCategory={onAddCategory} />
+            </div>
+          )}
           <div>
             <FieldLabel>Note (optional)</FieldLabel>
             <input type="text" placeholder="e.g. Lunch with team" value={form.note}
               onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }} />
           </div>
-          {accounts.length > 0 && (
+
+          {form.type === "transfer" ? (
+            accounts.length >= 2 ? (
+              <>
+                <div>
+                  <FieldLabel>From Account</FieldLabel>
+                  <select value={transferFrom} onChange={(e) => setTransferFrom(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
+                    {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <FieldLabel>To Account</FieldLabel>
+                  <select value={transferTo} onChange={(e) => setTransferTo(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
+                    {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <div style={{ gridColumn: "1 / -1", fontSize: 12.5, color: COLORS.mutedLight }}>
+                You need at least 2 accounts set up to transfer between them — add one in the Accounts tab.
+              </div>
+            )
+          ) : accounts.length > 0 && (
             <div style={{ gridColumn: "1 / -1" }}>
               <FieldLabel>Account</FieldLabel>
               <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }}>
@@ -1303,23 +1436,30 @@ function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, onAd
 
 /* ---------- ledger ---------- */
 
-function Ledger({ entries, onRemove, categories }) {
-  const [monthFilter, setMonthFilter] = useState("all");
+function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCategory }) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [periodType, setPeriodType] = useState("all");
+  const [anchor, setAnchor] = useState(new Date());
+  const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
+  const [editingId, setEditingId] = useState(null);
 
-  const months = useMemo(() => {
-    const s = new Set(entries.map((e) => monthKey(e.date)));
-    return [...s].sort().reverse();
-  }, [entries]);
+  const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
+  const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
 
   const allCats = [...new Set([...categories.expense, ...categories.income])];
 
+  const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0);
+
+  const clearFilters = () => { setPeriodType("all"); setAnchor(new Date()); setTypeFilter("all"); setCatFilter("all"); };
+
   const filtered = useMemo(() => (
     [...entries]
-      .filter((e) => monthFilter === "all" || monthKey(e.date) === monthFilter)
+      .filter((e) => periodType === "all" || (e.date >= range.start && e.date <= range.end))
+      .filter((e) => typeFilter === "all" || e.type === typeFilter)
       .filter((e) => catFilter === "all" || e.category === catFilter)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
-  ), [entries, monthFilter, catFilter]);
+  ), [entries, periodType, range, typeFilter, catFilter]);
 
   const groups = useMemo(() => {
     const map = new Map();
@@ -1330,24 +1470,87 @@ function Ledger({ entries, onRemove, categories }) {
     return [...map.entries()];
   }, [filtered]);
 
+  const isCurrentPeriod = periodType === "all" ? true
+    : periodType === "day" ? isoOf(anchor) === todayISO()
+    : periodType === "week" ? isoOf(getMonday(anchor)) === isoOf(getMonday(new Date()))
+    : anchor.getFullYear() === new Date().getFullYear() && anchor.getMonth() === new Date().getMonth();
+
   return (
     <SectionCard title="Transaction Ledger" right={
-      <div style={{ display: "flex", gap: 8 }}>
-        <SelectBox value={monthFilter} onChange={setMonthFilter}>
-          <option value="all">All months</option>
-          {months.map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
-        </SelectBox>
-        <SelectBox value={catFilter} onChange={setCatFilter}>
-          <option value="all">All categories</option>
-          {allCats.map((c) => <option key={c} value={c}>{c}</option>)}
-        </SelectBox>
-      </div>
+      <button onClick={() => setFiltersOpen((v) => !v)} style={{
+        display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 999,
+        border: "1px solid " + (activeFilterCount > 0 ? COLORS.orange : COLORS.border),
+        background: activeFilterCount > 0 ? COLORS.orangeLight : COLORS.card,
+        color: activeFilterCount > 0 ? COLORS.orangeDark : COLORS.muted, fontSize: 12.5, fontWeight: 700, cursor: "pointer"
+      }}>
+        <SlidersHorizontal size={13} /> Filters
+        {activeFilterCount > 0 && (
+          <span style={{ background: COLORS.orange, color: "#fff", borderRadius: 999, minWidth: 16, height: 16, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>
+            {activeFilterCount}
+          </span>
+        )}
+        <ChevronDown size={13} style={{ transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
     }>
+      {filtersOpen && (
+        <div className="nav-dropdown" style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 14, padding: 14, marginBottom: 14 }}>
+          <FieldLabel>Period</FieldLabel>
+          <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 12 : 10 }}>
+            {[["all", "All Time"], ["day", "Day"], ["week", "Week"], ["month", "Month"]].map(([id, label]) => (
+              <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
+                flex: 1, padding: "8px 6px", borderRadius: 9, border: "1px solid " + (periodType === id ? COLORS.orange : COLORS.border),
+                background: periodType === id ? COLORS.orangeLight : COLORS.card, color: periodType === id ? COLORS.orangeDark : COLORS.muted,
+                fontWeight: 700, fontSize: 12, cursor: "pointer"
+              }}>{label}</button>
+            ))}
+          </div>
+          {periodType !== "all" && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+              <button onClick={() => setAnchor((a) => shiftAnchor(rangeKey, a, -1))} style={navBtnStyle} aria-label="Previous"><ChevronLeft size={15} /></button>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>{range.label}</div>
+                {!isCurrentPeriod && <button onClick={() => setAnchor(new Date())} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 10.5, cursor: "pointer", padding: 0, marginTop: 1, fontWeight: 700 }}>Jump to current</button>}
+              </div>
+              <button onClick={() => setAnchor((a) => shiftAnchor(rangeKey, a, 1))} style={navBtnStyle} aria-label="Next"><ChevronRight size={15} /></button>
+            </div>
+          )}
+
+          <FieldLabel>Type</FieldLabel>
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            {[["all", "All"], ["income", "Income"], ["expense", "Expense"], ["transfer", "Transfer"]].map(([id, label]) => (
+              <button key={id} onClick={() => setTypeFilter(id)} style={{
+                flex: 1, padding: "8px 6px", borderRadius: 9, border: "1px solid " + (typeFilter === id ? COLORS.blue : COLORS.border),
+                background: typeFilter === id ? COLORS.blueLight : COLORS.card, color: typeFilter === id ? COLORS.blue : COLORS.muted,
+                fontWeight: 700, fontSize: 12, cursor: "pointer"
+              }}>{label}</button>
+            ))}
+          </div>
+
+          <FieldLabel>Category</FieldLabel>
+          <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", marginBottom: activeFilterCount > 0 ? 12 : 0 }}>
+            <option value="all">All categories</option>
+            {allCats.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+
+          {activeFilterCount > 0 && (
+            <button onClick={clearFilters} style={{ background: "none", border: "none", color: COLORS.rose, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+              Clear all filters
+            </button>
+          )}
+        </div>
+      )}
+
       {filtered.length === 0 && <EmptyNote>No entries match this filter.</EmptyNote>}
       {groups.map(([date, items], gi) => (
         <div key={date} style={{ marginBottom: gi === groups.length - 1 ? 0 : 6 }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: COLORS.muted, padding: "10px 2px 4px" }}>{relDateLabel(date)}</div>
-          {items.map((e, i) => <TxRow key={e.id} e={e} last={i === items.length - 1} onRemove={onRemove} hideDate />)}
+          {items.map((e, i) => editingId === e.id ? (
+            <EditEntryForm key={e.id} entry={e} categories={categories} accounts={accounts} onAddCategory={onAddCategory}
+              onSave={(patch) => { onUpdate(e.id, patch); setEditingId(null); }}
+              onCancel={() => setEditingId(null)} />
+          ) : (
+            <TxRow key={e.id} e={e} last={i === items.length - 1} onRemove={onRemove} onEdit={() => setEditingId(e.id)} hideDate accounts={accounts} />
+          ))}
         </div>
       ))}
     </SectionCard>
@@ -1356,7 +1559,7 @@ function Ledger({ entries, onRemove, categories }) {
 
 /* ---------- periods (daily / weekly / monthly profit-or-loss) ---------- */
 
-function Periods({ entries }) {
+function Periods({ entries, accounts }) {
   const [periodType, setPeriodType] = useState("daily");
   const [anchor, setAnchor] = useState(new Date());
 
@@ -1425,7 +1628,7 @@ function Periods({ entries }) {
 
       <SectionCard title={`Transactions (${inRange.length})`}>
         {inRange.length === 0 && <EmptyNote>No transactions in this period.</EmptyNote>}
-        {inRange.map((e, i) => <TxRow key={e.id} e={e} last={i === inRange.length - 1} />)}
+        {inRange.map((e, i) => <TxRow key={e.id} e={e} last={i === inRange.length - 1} accounts={accounts} />)}
       </SectionCard>
     </div>
   );
@@ -2067,25 +2270,201 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
   );
 }
 
+/* ---------- mobile sidebar ---------- */
+
+function Sidebar({ open, onClose, NAV, tab, setTab, profileName }) {
+  const itemStyle = (active) => ({
+    display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+    padding: "10px 12px", borderRadius: 10, border: "none", marginBottom: 2,
+    background: active ? COLORS.orangeLight : "transparent", color: active ? COLORS.orangeDark : COLORS.text,
+    fontSize: 13.5, fontWeight: 600, cursor: "pointer"
+  });
+
+  const go = (id) => { setTab(id); onClose(); };
+
+  return (
+    <>
+      <div className={"sidebar-backdrop" + (open ? " open" : "")} onClick={onClose} />
+      <div className={"sidebar-drawer" + (open ? " open" : "")}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 16px", borderBottom: "1px solid " + COLORS.border }}>
+          <div>
+            <div style={{ fontSize: 10.5, letterSpacing: "0.1em", color: COLORS.muted, textTransform: "uppercase", fontWeight: 700 }}>Menu</div>
+            <div style={{ fontSize: 14.5, fontWeight: 800 }}>{profileName || "Finance Tracker"}</div>
+          </div>
+          <button onClick={onClose} aria-label="Close menu" style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", display: "flex", padding: 4 }}>
+            <X size={20} />
+          </button>
+        </div>
+        <div style={{ padding: "10px 10px 20px", overflowY: "auto", flex: 1 }}>
+          {NAV.map((item) => item.children ? (
+            <div key={item.group} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.mutedLight, textTransform: "uppercase", letterSpacing: "0.06em", padding: "10px 12px 4px" }}>{item.label}</div>
+              {item.children.map((c) => (
+                <button key={c.id} onClick={() => go(c.id)} style={itemStyle(tab === c.id)}>
+                  <c.icon size={16} /> {c.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <button key={item.id} onClick={() => go(item.id)} style={itemStyle(tab === item.id)}>
+              <item.icon size={16} /> {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 /* ---------- settings ---------- */
 
-function Settings({ theme, onSetTheme }) {
-  const [customColor, setCustomColor] = useState(theme.accent);
+function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory }) {
+  const [typeTab, setTypeTab] = useState("expense");
+  const [editingName, setEditingName] = useState(null);
+  const [editValue, setEditValue] = useState("");
+  const [newName, setNewName] = useState("");
 
-  useEffect(() => { setCustomColor(theme.accent); }, [theme.accent]);
+  const usageCount = (name) => entries.filter((e) => e.type === typeTab && e.category === name).length;
 
-  const applyCustomColor = (hex) => {
-    setCustomColor(hex);
-    onSetTheme({ accent: hex });
+  const startEdit = (name) => { setEditingName(name); setEditValue(name); };
+  const commitEdit = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== editingName) onRename(typeTab, editingName, trimmed);
+    setEditingName(null);
   };
 
-  const reset = () => onSetTheme({ mode: "light", accent: DEFAULT_THEME.accent });
+  const addNew = () => {
+    if (!newName.trim()) return;
+    onAddCategory(typeTab, newName.trim());
+    setNewName("");
+  };
+
+  const list = categories[typeTab];
+
+  return (
+    <SectionCard title="Categories" icon={<Tag size={13} />}>
+      <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+        Rename or remove categories. Renaming updates every transaction, budget, and recurring item that uses it — deleting just stops offering it for new entries, past transactions keep their label.
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+        {[["expense", "Expense"], ["income", "Income"]].map(([id, label]) => (
+          <button key={id} onClick={() => { setTypeTab(id); setEditingName(null); }} style={{
+            flex: 1, padding: "8px 10px", borderRadius: 10, border: "1px solid " + (typeTab === id ? COLORS.orange : COLORS.border),
+            background: typeTab === id ? COLORS.orangeLight : COLORS.card, color: typeTab === id ? COLORS.orangeDark : COLORS.muted,
+            fontWeight: 700, fontSize: 12.5, cursor: "pointer"
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {list.map((c, i) => (
+        <div key={c} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 2px", borderBottom: i === list.length - 1 ? "none" : "1px solid " + COLORS.border }}>
+          {editingName === c ? (
+            <>
+              <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingName(null); }}
+                style={{ flex: 1, minWidth: 0, fontSize: 13.5 }} />
+              <button onClick={commitEdit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                <Check size={12} />
+              </button>
+              <button onClick={() => setEditingName(null)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>
+                ✕
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: catColor(c), minWidth: 8 }} />
+              <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c}</span>
+              <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usageCount(c)} used</span>
+              <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
+                <Pencil size={13} />
+              </button>
+              <button onClick={() => onDelete(typeTab, c)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
+                <Trash2 size={13} />
+              </button>
+            </>
+          )}
+        </div>
+      ))}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <input type="text" placeholder="New category name" value={newName} onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addNew()} style={{ flex: 1, minWidth: 0 }} />
+        <button onClick={addNew} style={{ background: COLORS.orangeLight, color: COLORS.orangeDark, border: "none", borderRadius: 10, padding: "0 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+          + Add
+        </button>
+      </div>
+    </SectionCard>
+  );
+}
+
+function AccentColorPicker({ value, onChange }) {
+  const [customColor, setCustomColor] = useState(value);
+  useEffect(() => { setCustomColor(value); }, [value]);
+
+  const apply = (hex) => { setCustomColor(hex); onChange(hex); };
+
+  return (
+    <>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        {ACCENT_PRESETS.map((hex) => (
+          <button key={hex} onClick={() => apply(hex)} aria-label={hex} style={{
+            width: 36, height: 36, borderRadius: "50%", background: hex, border: value.toLowerCase() === hex.toLowerCase() ? `2px solid ${COLORS.text}` : "2px solid transparent",
+            boxShadow: SHADOW, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center"
+          }}>
+            {value.toLowerCase() === hex.toLowerCase() && <Check size={15} color="#fff" />}
+          </button>
+        ))}
+        <label style={{
+          width: 36, height: 36, borderRadius: "50%", cursor: "pointer", position: "relative", overflow: "hidden",
+          border: "2px solid " + COLORS.border, boxShadow: SHADOW, display: "flex", alignItems: "center", justifyContent: "center",
+          background: `conic-gradient(from 0deg, red, yellow, lime, cyan, blue, magenta, red)`
+        }}>
+          <input type="color" value={customColor} onChange={(e) => apply(e.target.value)}
+            style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", border: "none", padding: 0 }} />
+        </label>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <input type="text" value={customColor} onChange={(e) => setCustomColor(e.target.value)}
+          onBlur={() => /^#[0-9A-Fa-f]{6}$/.test(customColor) && apply(customColor)}
+          onKeyDown={(e) => e.key === "Enter" && /^#[0-9A-Fa-f]{6}$/.test(customColor) && apply(customColor)}
+          placeholder="#10B981" style={{ width: 120 }} className="mono" />
+        <span style={{ fontSize: 11.5, color: COLORS.mutedLight }}>Type or paste any hex color</span>
+      </div>
+    </>
+  );
+}
+
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory }) {
+  const [name, setName] = useState(profile.name);
+
+  useEffect(() => { setName(profile.name); }, [profile.name]);
+
+  const saveName = () => onSetProfile({ name: name.trim() });
+
+  const reset = () => onSetTheme({ mode: "light", accent: DEFAULT_THEME.accent, secondaryAccent: DEFAULT_THEME.secondaryAccent });
 
   return (
     <div>
+      <SectionCard title="Profile" icon={<Users size={13} />}>
+        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+          Set your name to personalize the greeting at the top of the app.
+        </div>
+        <FieldLabel>Your Name</FieldLabel>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input type="text" placeholder="e.g. Brennan" value={name} onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && saveName()} style={{ flex: 1, minWidth: 0 }} />
+          <button onClick={saveName} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10, padding: "0 18px", fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
+            Save
+          </button>
+        </div>
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
       <SectionCard title="Appearance" icon={<Palette size={13} />}>
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-          Switch between light and dark, and pick any accent color you like — it updates buttons, highlights, and charts throughout the app.
+          Switch between light and dark, and pick any accent colors you like — it updates buttons, highlights, and charts throughout the app.
         </div>
 
         <FieldLabel>Mode</FieldLabel>
@@ -2108,32 +2487,20 @@ function Settings({ theme, onSetTheme }) {
           </button>
         </div>
 
-        <FieldLabel>Accent Color</FieldLabel>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
-          {ACCENT_PRESETS.map((hex) => (
-            <button key={hex} onClick={() => applyCustomColor(hex)} aria-label={hex} style={{
-              width: 36, height: 36, borderRadius: "50%", background: hex, border: theme.accent.toLowerCase() === hex.toLowerCase() ? `2px solid ${COLORS.text}` : "2px solid transparent",
-              boxShadow: SHADOW, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center"
-            }}>
-              {theme.accent.toLowerCase() === hex.toLowerCase() && <Check size={15} color="#fff" />}
-            </button>
-          ))}
-          <label style={{
-            width: 36, height: 36, borderRadius: "50%", cursor: "pointer", position: "relative", overflow: "hidden",
-            border: "2px solid " + COLORS.border, boxShadow: SHADOW, display: "flex", alignItems: "center", justifyContent: "center",
-            background: `conic-gradient(from 0deg, red, yellow, lime, cyan, blue, magenta, red)`
-          }}>
-            <input type="color" value={customColor} onChange={(e) => applyCustomColor(e.target.value)}
-              style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", border: "none", padding: 0 }} />
-          </label>
+        <FieldLabel>Primary Accent Color</FieldLabel>
+        <div style={{ fontSize: 11.5, color: COLORS.mutedLight, marginBottom: 10 }}>
+          Used for main buttons, active tabs, and the balance card.
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <AccentColorPicker value={theme.accent} onChange={(hex) => onSetTheme({ accent: hex })} />
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-          <input type="text" value={customColor} onChange={(e) => setCustomColor(e.target.value)}
-            onBlur={() => /^#[0-9A-Fa-f]{6}$/.test(customColor) && applyCustomColor(customColor)}
-            onKeyDown={(e) => e.key === "Enter" && /^#[0-9A-Fa-f]{6}$/.test(customColor) && applyCustomColor(customColor)}
-            placeholder="#10B981" style={{ width: 120 }} className="mono" />
-          <span style={{ fontSize: 11.5, color: COLORS.mutedLight }}>Type or paste any hex color</span>
+        <FieldLabel>Secondary Accent Color</FieldLabel>
+        <div style={{ fontSize: 11.5, color: COLORS.mutedLight, marginBottom: 10 }}>
+          Used for the "other" option in double selections, like the Type filter in your ledger or the frequency toggle for recurring transactions.
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <AccentColorPicker value={theme.secondaryAccent} onChange={(hex) => onSetTheme({ secondaryAccent: hex })} />
         </div>
 
         <button onClick={reset} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>
@@ -2144,12 +2511,20 @@ function Settings({ theme, onSetTheme }) {
       <div style={{ height: 16 }} />
 
       <SectionCard title="Preview">
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 12 }}>
           <div style={{ padding: "10px 18px", borderRadius: 12, background: COLORS.orange, color: "#fff", fontWeight: 700, fontSize: 13.5 }}>Primary Button</div>
           <div style={{ padding: "10px 16px", borderRadius: 999, background: COLORS.orangeLight, color: COLORS.orangeDark, fontWeight: 700, fontSize: 12.5 }}>Active Pill</div>
           <div style={{ width: 44, height: 44, borderRadius: "50%", background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.orangeDark})` }} />
         </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <div style={{ padding: "10px 16px", borderRadius: 999, background: COLORS.blueLight, color: COLORS.blue, fontWeight: 700, fontSize: 12.5, border: "1px solid " + COLORS.blue }}>Secondary Pill</div>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: COLORS.blue }} />
+        </div>
       </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} />
     </div>
   );
 }
@@ -2167,28 +2542,114 @@ function debtBadgeText(e) {
   return null;
 }
 
-function TxRow({ e, last, onRemove, hideDate }) {
-  const cols = [hideDate ? null : "56px", "1fr", "auto", onRemove ? "26px" : null].filter(Boolean).join(" ");
+function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCategory }) {
+  const isTransfer = entry.type === "transfer";
+  const [amount, setAmount] = useState(entry.amount);
+  const [date, setDate] = useState(entry.date);
+  const [note, setNote] = useState(entry.note || "");
+  const [category, setCategory] = useState(entry.category || "");
+  const [accountId, setAccountId] = useState(entry.accountId || "");
+  const [fromAccountId, setFromAccountId] = useState(entry.fromAccountId || "");
+  const [toAccountId, setToAccountId] = useState(entry.toAccountId || "");
+  const [error, setError] = useState("");
+
+  const save = () => {
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) { setError("Enter an amount greater than zero."); return; }
+    if (!date) { setError("Pick a date."); return; }
+    if (isTransfer) {
+      if (!fromAccountId || !toAccountId) { setError("Choose both a from and to account."); return; }
+      if (fromAccountId === toAccountId) { setError("Pick two different accounts."); return; }
+      onSave({ amount: amt, date, note: note.trim(), fromAccountId, toAccountId });
+    } else {
+      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null });
+    }
+  };
+
+  return (
+    <div style={{ padding: "12px 8px", marginBottom: 6, background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ fontSize: 13 }} className="mono" />
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ fontSize: 13 }} />
+        {isTransfer ? (
+          <>
+            <select value={fromAccountId} onChange={(e) => setFromAccountId(e.target.value)} style={{ fontSize: 13 }}>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <select value={toAccountId} onChange={(e) => setToAccountId(e.target.value)} style={{ fontSize: 13 }}>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </>
+        ) : (
+          <>
+            <CategorySelect value={category} onChange={setCategory}
+              options={entry.type === "expense" ? categories.expense : categories.income} type={entry.type} onAddCategory={onAddCategory} />
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} style={{ fontSize: 13 }}>
+              <option value="">Unassigned</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </>
+        )}
+        <input type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ fontSize: 13, gridColumn: "1 / -1" }} />
+      </div>
+      {entry.debts && entry.debts.length > 0 && (
+        <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 8 }}>
+          This transaction has shared-cost details attached — those aren't editable here, only the base fields above.
+        </div>
+      )}
+      {error && <div style={{ color: COLORS.rose, fontSize: 12, marginBottom: 8, fontWeight: 600 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 6 }}>
+        <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Save</button>
+        <button onClick={onCancel} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function TxRow({ e, last, onRemove, onEdit, hideDate, accounts }) {
+  const cols = [hideDate ? null : "56px", "1fr", "auto", onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
   const badge = debtBadgeText(e);
+  const isTransfer = e.type === "transfer";
+
+  let title, subtitle;
+  if (isTransfer) {
+    const fromName = accounts?.find((a) => a.id === e.fromAccountId)?.name || "Account";
+    const toName = accounts?.find((a) => a.id === e.toAccountId)?.name || "Account";
+    title = e.note || "Transfer";
+    subtitle = `${fromName} → ${toName}`;
+  } else {
+    title = e.note || e.category;
+    subtitle = e.categoryLabel || e.category;
+  }
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: cols, alignItems: "center", gap: 10, padding: "10px 2px", borderBottom: last ? "none" : "1px solid " + COLORS.border }}>
       {!hideDate && <div className="mono" style={{ fontSize: 11, color: COLORS.muted }}>{e.date.slice(5)}</div>}
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-        <span style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: catColor(e.category) + "22", color: catColor(e.category), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          {e.type === "income" ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+        <span style={{
+          width: 32, height: 32, minWidth: 32, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+          background: isTransfer ? COLORS.blueLight : catColor(e.category) + "22",
+          color: isTransfer ? COLORS.blue : catColor(e.category)
+        }}>
+          {isTransfer ? <ArrowRightLeft size={14} /> : e.type === "income" ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
         </span>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.note || e.category}</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: COLORS.muted }}>{e.categoryLabel || e.category}</span>
+            <span style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
             {badge && <Badge>{badge}</Badge>}
             {e.recurring && <Badge>Recurring</Badge>}
           </div>
         </div>
       </div>
-      <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: e.type === "income" ? COLORS.green : COLORS.text, textAlign: "right", whiteSpace: "nowrap" }}>
-        {e.type === "income" ? "+" : "−"}{fmt(e.amount)}
+      <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: isTransfer ? COLORS.blue : e.type === "income" ? COLORS.green : COLORS.text, textAlign: "right", whiteSpace: "nowrap" }}>
+        {isTransfer ? "⇄ " : e.type === "income" ? "+" : "−"}{fmt(e.amount)}
       </div>
+      {onEdit && (
+        <button onClick={() => onEdit(e)} aria-label="Edit entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
+          <Pencil size={14} />
+        </button>
+      )}
       {onRemove && (
         <button onClick={() => onRemove(e.id)} aria-label="Delete entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
           <Trash2 size={14} />
@@ -2364,8 +2825,31 @@ function GlobalStyle() {
       @keyframes toastIn { from { opacity: 0; transform: translateY(-10px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
       .toast-leaving { animation: toastOut .2s ease forwards; }
       @keyframes toastOut { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(-8px) scale(0.96); } }
+
+      .mobile-menu-btn { display: none; }
+      .sidebar-backdrop {
+        position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 250;
+        opacity: 0; pointer-events: none; transition: opacity .2s ease;
+      }
+      .sidebar-backdrop.open { opacity: 1; pointer-events: auto; }
+      .sidebar-drawer {
+        position: fixed; top: 0; left: 0; bottom: 0; width: 78%; max-width: 300px;
+        background: ${COLORS.card}; z-index: 260; display: flex; flex-direction: column;
+        transform: translateX(-100%); transition: transform .25s cubic-bezier(0.4,0,0.2,1);
+        box-shadow: 0 0 40px rgba(0,0,0,0.25);
+      }
+      .sidebar-drawer.open { transform: translateX(0); }
+
+      @media (max-width: 767px) {
+        .mobile-menu-btn { display: flex; align-items: center; justify-content: center; }
+        .nav-top-bar { display: none; }
+      }
+      @media (min-width: 768px) {
+        .sidebar-drawer, .sidebar-backdrop { display: none !important; }
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        .hero-wave, .tab-panel, .nav-dropdown, .toast-item, .toast-leaving, button { animation: none !important; transition: none !important; }
+        .hero-wave, .tab-panel, .nav-dropdown, .toast-item, .toast-leaving, .sidebar-drawer, .sidebar-backdrop, button { animation: none !important; transition: none !important; }
       }
     `}</style>
   );
