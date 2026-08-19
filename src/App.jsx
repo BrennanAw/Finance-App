@@ -2842,7 +2842,7 @@ function GlobalStyle() {
 
       @media (max-width: 767px) {
         .mobile-menu-btn { display: flex; align-items: center; justify-content: center; }
-        .nav-top-bar { display: none; }
+        .nav-top-bar { display: none !important; }
       }
       @media (min-width: 768px) {
         .sidebar-drawer, .sidebar-backdrop { display: none !important; }
