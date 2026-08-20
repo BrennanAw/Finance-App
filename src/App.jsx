@@ -591,7 +591,19 @@ export default function FinanceTracker() {
               onGoDebts={() => setTab("debts")}
             />
           )}
-          {tab === "accounts" && <Accounts accounts={data.accounts} entries={data.entries} onAdd={addAccount} onUpdate={updateAccount} onRemove={removeAccount} />}
+          {tab === "accounts" && (
+            <Accounts
+              accounts={data.accounts}
+              entries={data.entries}
+              onAdd={addAccount}
+              onUpdate={updateAccount}
+              onRemove={removeAccount}
+              onUpdateEntry={updateEntry}
+              onRemoveEntry={removeEntry}
+              categories={data.categories}
+              onAddCategory={addCategory}
+            />
+          )}
           {tab === "debts" && <Debts entries={data.entries} onSetDebtSettled={setDebtSettled} onLogAsIncome={logDebtAsIncome} />}
           {tab === "add" && (
             <AddTransaction
@@ -900,9 +912,94 @@ function QuickAction({ icon, color, label, onClick }) {
 
 /* ---------- accounts ---------- */
 
-function Accounts({ accounts, entries, onAdd, onUpdate, onRemove }) {
+function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEntry, onRemoveEntry, categories, onAddCategory }) {
+  const [editingId, setEditingId] = useState(null);
+
+  const related = useMemo(() => (
+    entries
+      .filter((e) => e.type === "transfer" ? (e.fromAccountId === account.id || e.toAccountId === account.id) : e.accountId === account.id)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
+  ), [entries, account.id]);
+
+  const groups = useMemo(() => {
+    const map = new Map();
+    related.forEach((e) => {
+      if (!map.has(e.date)) map.set(e.date, []);
+      map.get(e.date).push(e);
+    });
+    return [...map.entries()];
+  }, [related]);
+
+  const totals = useMemo(() => {
+    let inFlow = 0, outFlow = 0;
+    related.forEach((e) => {
+      if (e.type === "transfer") {
+        if (e.toAccountId === account.id) inFlow += e.amount; else outFlow += e.amount;
+      } else if (e.type === "income") inFlow += e.amount; else outFlow += e.amount;
+    });
+    return { inFlow, outFlow };
+  }, [related, account.id]);
+
+  const typeInfo = ACCOUNT_TYPES.find((t) => t.id === account.type) || ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+  const Icon = typeInfo.icon;
+
+  return (
+    <div>
+      <button onClick={onBack} style={{
+        display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+        color: COLORS.muted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0, marginBottom: 14
+      }}>
+        <ChevronLeft size={15} /> All Accounts
+      </button>
+
+      <SectionCard>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+          <span style={{ width: 44, height: 44, minWidth: 44, borderRadius: "50%", background: typeInfo.color + "22", color: typeInfo.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon size={20} />
+          </span>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>{account.name}</div>
+            <div style={{ fontSize: 12, color: COLORS.muted }}>{account.customType || typeInfo.label}</div>
+          </div>
+        </div>
+        <div className="mono" style={{ fontSize: 28, fontWeight: 800, marginBottom: 12 }}>{fmt(balance)}</div>
+        <div style={{ display: "flex", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: COLORS.mutedLight, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 700 }}>In</div>
+            <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: COLORS.green }}>{fmt(totals.inFlow)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10.5, color: COLORS.mutedLight, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 700 }}>Out</div>
+            <div className="mono" style={{ fontSize: 13, fontWeight: 700 }}>{fmt(totals.outFlow)}</div>
+          </div>
+        </div>
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      <SectionCard title={`Transactions (${related.length})`}>
+        {related.length === 0 && <EmptyNote>No transactions for this account yet.</EmptyNote>}
+        {groups.map(([date, items], gi) => (
+          <div key={date} style={{ marginBottom: gi === groups.length - 1 ? 0 : 6 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: COLORS.muted, padding: "10px 2px 4px" }}>{relDateLabel(date)}</div>
+            {items.map((e, i) => editingId === e.id ? (
+              <EditEntryForm key={e.id} entry={e} categories={categories} accounts={accounts} onAddCategory={onAddCategory}
+                onSave={(patch) => { onUpdateEntry(e.id, patch); setEditingId(null); }}
+                onCancel={() => setEditingId(null)} />
+            ) : (
+              <TxRow key={e.id} e={e} last={i === items.length - 1} onRemove={onRemoveEntry} onEdit={() => setEditingId(e.id)} hideDate accounts={accounts} />
+            ))}
+          </div>
+        ))}
+      </SectionCard>
+    </div>
+  );
+}
+
+function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry, onRemoveEntry, categories, onAddCategory }) {
   const [form, setForm] = useState({ name: "", type: "bank", customType: "", initialBalance: "" });
   const [error, setError] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
 
   const balanceFor = (accountId) => {
     const acc = accounts.find((a) => a.id === accountId);
@@ -918,6 +1015,10 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove }) {
     });
     return acc.initialBalance + net;
   };
+
+  useEffect(() => {
+    if (selectedId && !accounts.find((a) => a.id === selectedId)) setSelectedId(null);
+  }, [selectedId, accounts]);
 
   const unassignedNet = useMemo(() => (
     entries.filter((e) => e.type !== "transfer" && !e.accountId).reduce((s, e) => s + (e.type === "income" ? e.amount : -e.amount), 0)
@@ -935,6 +1036,23 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove }) {
     });
     setForm({ name: "", type: form.type, customType: "", initialBalance: "" });
   };
+
+  const selectedAccount = selectedId ? accounts.find((a) => a.id === selectedId) : null;
+  if (selectedAccount) {
+    return (
+      <AccountDetail
+        account={selectedAccount}
+        entries={entries}
+        accounts={accounts}
+        balance={balanceFor(selectedId)}
+        onBack={() => setSelectedId(null)}
+        onUpdateEntry={onUpdateEntry}
+        onRemoveEntry={onRemoveEntry}
+        categories={categories}
+        onAddCategory={onAddCategory}
+      />
+    );
+  }
 
   return (
     <div>
@@ -986,14 +1104,14 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove }) {
       <SectionCard title="Your Accounts">
         {accounts.length === 0 && <EmptyNote>No accounts yet. Add your bank, e-wallet, or cash on hand above to start tracking real balances.</EmptyNote>}
         {accounts.map((a, i) => (
-          <AccountRow key={a.id} account={a} balance={balanceFor(a.id)} onUpdate={onUpdate} onRemove={onRemove} isLast={i === accounts.length - 1} />
+          <AccountRow key={a.id} account={a} balance={balanceFor(a.id)} onUpdate={onUpdate} onRemove={onRemove} onView={setSelectedId} isLast={i === accounts.length - 1} />
         ))}
       </SectionCard>
     </div>
   );
 }
 
-function AccountRow({ account, balance, onUpdate, onRemove, isLast }) {
+function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
   const [type, setType] = useState(account.type);
@@ -1040,20 +1158,23 @@ function AccountRow({ account, balance, onUpdate, onRemove, isLast }) {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
-      <span style={{ width: 38, height: 38, minWidth: 38, borderRadius: "50%", background: typeInfo.color + "22", color: typeInfo.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <Icon size={17} />
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.name}</div>
-        <div style={{ fontSize: 11, color: COLORS.muted }}>{account.customType || typeInfo.label} · Started at {fmt(account.initialBalance)}</div>
-      </div>
-      <div style={{ textAlign: "right" }}>
-        <div className="mono" style={{ fontSize: 14, fontWeight: 800 }}>{fmt(balance)}</div>
-        {delta !== 0 && (
-          <div style={{ fontSize: 11, fontWeight: 700, color: delta >= 0 ? COLORS.green : COLORS.rose }}>
-            {delta >= 0 ? "+" : "−"}{fmt(Math.abs(delta))}
-          </div>
-        )}
+      <div onClick={() => onView(account.id)} style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, cursor: "pointer" }}>
+        <span style={{ width: 38, height: 38, minWidth: 38, borderRadius: "50%", background: typeInfo.color + "22", color: typeInfo.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Icon size={17} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.name}</div>
+          <div style={{ fontSize: 11, color: COLORS.muted }}>{account.customType || typeInfo.label} · Started at {fmt(account.initialBalance)}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 800 }}>{fmt(balance)}</div>
+          {delta !== 0 && (
+            <div style={{ fontSize: 11, fontWeight: 700, color: delta >= 0 ? COLORS.green : COLORS.rose }}>
+              {delta >= 0 ? "+" : "−"}{fmt(Math.abs(delta))}
+            </div>
+          )}
+        </div>
+        <ChevronRight size={16} style={{ color: COLORS.mutedLight, minWidth: 16 }} />
       </div>
       <button onClick={() => setEditing(true)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
         <Pencil size={14} />
@@ -1442,6 +1563,7 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
   const [anchor, setAnchor] = useState(new Date());
   const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
+  const [acctFilter, setAcctFilter] = useState("all");
   const [editingId, setEditingId] = useState(null);
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
@@ -1449,17 +1571,25 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
 
   const allCats = [...new Set([...categories.expense, ...categories.income])];
 
-  const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0);
+  const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0) + (acctFilter !== "all" ? 1 : 0);
 
-  const clearFilters = () => { setPeriodType("all"); setAnchor(new Date()); setTypeFilter("all"); setCatFilter("all"); };
+  const clearFilters = () => { setPeriodType("all"); setAnchor(new Date()); setTypeFilter("all"); setCatFilter("all"); setAcctFilter("all"); };
+
+  const matchesAccount = (e) => {
+    if (acctFilter === "all") return true;
+    if (acctFilter === "unassigned") return e.type !== "transfer" && !e.accountId;
+    if (e.type === "transfer") return e.fromAccountId === acctFilter || e.toAccountId === acctFilter;
+    return e.accountId === acctFilter;
+  };
 
   const filtered = useMemo(() => (
     [...entries]
       .filter((e) => periodType === "all" || (e.date >= range.start && e.date <= range.end))
       .filter((e) => typeFilter === "all" || e.type === typeFilter)
       .filter((e) => catFilter === "all" || e.category === catFilter)
+      .filter(matchesAccount)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
-  ), [entries, periodType, range, typeFilter, catFilter]);
+  ), [entries, periodType, range, typeFilter, catFilter, acctFilter]);
 
   const groups = useMemo(() => {
     const map = new Map();
@@ -1527,10 +1657,21 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
           </div>
 
           <FieldLabel>Category</FieldLabel>
-          <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", marginBottom: activeFilterCount > 0 ? 12 : 0 }}>
+          <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", marginBottom: 12 }}>
             <option value="all">All categories</option>
             {allCats.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
+
+          {accounts.length > 0 && (
+            <>
+              <FieldLabel>Account</FieldLabel>
+              <select value={acctFilter} onChange={(e) => setAcctFilter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", marginBottom: activeFilterCount > 0 ? 12 : 0 }}>
+                <option value="all">All accounts</option>
+                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                <option value="unassigned">Unassigned</option>
+              </select>
+            </>
+          )}
 
           {activeFilterCount > 0 && (
             <button onClick={clearFilters} style={{ background: "none", border: "none", color: COLORS.rose, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>
