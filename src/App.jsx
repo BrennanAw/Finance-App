@@ -300,7 +300,7 @@ export default function FinanceTracker() {
           if (today >= occurrenceDate) {
             newEntries.push({
               id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
-              category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: isoOf(occurrenceDate), recurring: true
+              category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: isoOf(occurrenceDate), recurring: true, accountId: r.accountId || null
             });
             return { ...r, lastRun: wk };
           }
@@ -313,7 +313,7 @@ export default function FinanceTracker() {
           const dateStr = `${cmk}-${String(runDay).padStart(2, "0")}`;
           newEntries.push({
             id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
-            category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: dateStr, recurring: true
+            category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: dateStr, recurring: true, accountId: r.accountId || null
           });
           return { ...r, lastRun: cmk };
         }
@@ -355,11 +355,11 @@ export default function FinanceTracker() {
     pushToast(settled ? "Marked as paid" : "Marked as unpaid", settled ? "success" : "info", settled ? Check : Users);
   };
 
-  const logDebtAsIncome = (entryId, debtId) => {
+  const logDebtAsIncome = (entryId, debtId, accountId) => {
     const entry = data.entries.find((e) => e.id === entryId);
     const debt = entry && (entry.debts || []).find((d) => d.id === debtId);
     if (!debt) return;
-    addEntry({ type: "income", amount: debt.amount, category: "Other", note: `Repayment from ${debt.name}`, date: todayISO(), accountId: entry.accountId || null });
+    addEntry({ type: "income", amount: debt.amount, category: "Other", note: `Repayment from ${debt.name}`, date: todayISO(), accountId: accountId || null });
     setDebtSettled(entryId, debtId, true);
   };
 
@@ -605,7 +605,7 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "debts" && <Debts entries={data.entries} onSetDebtSettled={setDebtSettled} onLogAsIncome={logDebtAsIncome} />}
+          {tab === "debts" && <Debts entries={data.entries} accounts={data.accounts} onSetDebtSettled={setDebtSettled} onLogAsIncome={logDebtAsIncome} />}
           {tab === "add" && (
             <AddTransaction
               onAdd={addEntry}
@@ -644,6 +644,7 @@ export default function FinanceTracker() {
               onRemove={removeRecurring}
               categories={data.categories}
               onAddCategory={addCategory}
+              accounts={data.accounts}
             />
           )}
           {tab === "settings" && (
@@ -1191,7 +1192,63 @@ function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
 
 /* ---------- debts (money owed to you) ---------- */
 
-function Debts({ entries, onSetDebtSettled, onLogAsIncome }) {
+function DebtRow({ d, accounts, last, onSetDebtSettled, onLogAsIncome }) {
+  const [picking, setPicking] = useState(false);
+  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+
+  const handleLogClick = () => {
+    if (accounts.length === 0) { onLogAsIncome(d.entryId, d.id, null); return; }
+    setPicking((v) => !v);
+  };
+
+  const confirm = () => {
+    onLogAsIncome(d.entryId, d.id, accountId || null);
+    setPicking(false);
+  };
+
+  return (
+    <div style={{ borderBottom: last ? "none" : "1px solid " + COLORS.border, opacity: d.settled ? 0.55 : 1, padding: "11px 2px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
+          <div style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.entryNote} · {relDateLabel(d.entryDate)}</div>
+        </div>
+        <span className="mono" style={{ fontSize: 13.5, fontWeight: 700, textDecoration: d.settled ? "line-through" : "none", whiteSpace: "nowrap" }}>{fmt(d.amount)}</span>
+        {!d.settled ? (
+          <>
+            <button onClick={handleLogClick} title="Log repayment as income" style={{ background: picking ? COLORS.greenLight : COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.green, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
+              <TrendingUp size={13} />
+            </button>
+            <button onClick={() => onSetDebtSettled(d.entryId, d.id, true)} title="Mark as paid" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.muted, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
+              <Check size={13} />
+            </button>
+          </>
+        ) : (
+          <button onClick={() => onSetDebtSettled(d.entryId, d.id, false)} title="Mark as unpaid" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.mutedLight, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
+            <Power size={13} />
+          </button>
+        )}
+      </div>
+      {picking && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 10 }}>
+          <span style={{ fontSize: 12, color: COLORS.muted, fontWeight: 600, whiteSpace: "nowrap" }}>Deposit into</span>
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>
+            <option value="">Unassigned</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+          <button onClick={confirm} style={{ background: COLORS.green, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+            Confirm
+          </button>
+          <button onClick={() => setPicking(false)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Debts({ entries, accounts, onSetDebtSettled, onLogAsIncome }) {
   const [filter, setFilter] = useState("outstanding");
 
   const allDebts = useMemo(() => {
@@ -1269,27 +1326,7 @@ function Debts({ entries, onSetDebtSettled, onLogAsIncome }) {
       }>
         {filtered.length === 0 && <EmptyNote>Nothing here yet. Tick "Other people owe me for this" when adding an expense to start tracking IOUs.</EmptyNote>}
         {filtered.map((d, i) => (
-          <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 2px", borderBottom: i === filtered.length - 1 ? "none" : "1px solid " + COLORS.border, opacity: d.settled ? 0.55 : 1 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
-              <div style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.entryNote} · {relDateLabel(d.entryDate)}</div>
-            </div>
-            <span className="mono" style={{ fontSize: 13.5, fontWeight: 700, textDecoration: d.settled ? "line-through" : "none", whiteSpace: "nowrap" }}>{fmt(d.amount)}</span>
-            {!d.settled ? (
-              <>
-                <button onClick={() => onLogAsIncome(d.entryId, d.id)} title="Log repayment as income" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.green, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
-                  <TrendingUp size={13} />
-                </button>
-                <button onClick={() => onSetDebtSettled(d.entryId, d.id, true)} title="Mark as paid" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.muted, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
-                  <Check size={13} />
-                </button>
-              </>
-            ) : (
-              <button onClick={() => onSetDebtSettled(d.entryId, d.id, false)} title="Mark as unpaid" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.mutedLight, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
-                <Power size={13} />
-              </button>
-            )}
-          </div>
+          <DebtRow key={d.id} d={d} accounts={accounts} last={i === filtered.length - 1} onSetDebtSettled={onSetDebtSettled} onLogAsIncome={onLogAsIncome} />
         ))}
       </SectionCard>
     </div>
@@ -2220,8 +2257,8 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove }) {
 
 /* ---------- recurring ---------- */
 
-function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories, onAddCategory }) {
-  const [form, setForm] = useState({ name: "", amount: "", type: "expense", category: categories.expense[0], categoryLabel: "", frequency: "monthly", day: 1 });
+function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories, onAddCategory, accounts }) {
+  const [form, setForm] = useState({ name: "", amount: "", type: "expense", category: categories.expense[0], categoryLabel: "", frequency: "monthly", day: 1, accountId: "" });
   const [error, setError] = useState("");
 
   const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : categories.income[0], categoryLabel: "" }));
@@ -2236,7 +2273,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories,
     onAdd({
       name: form.name.trim(), amount, type: form.type, category: form.category,
       categoryLabel: form.category === "Other" ? form.categoryLabel.trim() : "",
-      frequency: form.frequency, day: parseInt(form.day), active: true
+      frequency: form.frequency, day: parseInt(form.day), active: true, accountId: form.accountId || null
     });
     setForm((f) => ({ ...f, name: "", amount: "", categoryLabel: "" }));
   };
@@ -2292,6 +2329,15 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories,
           <input type="text" placeholder="Describe this category (optional), e.g. Gym Membership" value={form.categoryLabel}
             onChange={(e) => setForm((f) => ({ ...f, categoryLabel: e.target.value }))} style={{ width: "100%", boxSizing: "border-box", marginBottom: 10 }} />
         )}
+        {accounts.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <FieldLabel>Account</FieldLabel>
+            <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }}>
+              <option value="">Unassigned</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+        )}
         {error && <div style={{ color: COLORS.rose, fontSize: 12.5, marginBottom: 10, fontWeight: 600 }}>{error}</div>}
         <button onClick={submit} style={{
           display: "flex", alignItems: "center", gap: 6, background: COLORS.orange, color: "#fff",
@@ -2309,19 +2355,19 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories,
       <SectionCard title="Active Recurring Items">
         {recurring.length === 0 && <EmptyNote>No recurring transactions set up yet.</EmptyNote>}
         {recurring.map((r, i) => (
-          <RecurringRow key={r.id} r={r} onUpdate={onUpdate} onToggle={onToggle} onRemove={onRemove} isLast={i === recurring.length - 1} categories={categories} onAddCategory={onAddCategory} />
+          <RecurringRow key={r.id} r={r} onUpdate={onUpdate} onToggle={onToggle} onRemove={onRemove} isLast={i === recurring.length - 1} categories={categories} onAddCategory={onAddCategory} accounts={accounts} />
         ))}
       </SectionCard>
     </div>
   );
 }
 
-function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onAddCategory }) {
+function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onAddCategory, accounts }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day });
+  const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "" });
 
   useEffect(() => {
-    setForm({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day });
+    setForm({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "" });
   }, [r]);
 
   const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : categories.income[0], categoryLabel: "" }));
@@ -2332,7 +2378,7 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
     onUpdate(r.id, {
       name: form.name.trim(), amount, type: form.type, category: form.category,
       categoryLabel: form.category === "Other" ? form.categoryLabel.trim() : "",
-      frequency: form.frequency, day: parseInt(form.day)
+      frequency: form.frequency, day: parseInt(form.day), accountId: form.accountId || null
     });
     setEditing(false);
   };
@@ -2371,6 +2417,12 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
           <input type="text" placeholder="Describe this category (optional)" value={form.categoryLabel}
             onChange={(e) => setForm((f) => ({ ...f, categoryLabel: e.target.value }))} style={{ width: "100%", boxSizing: "border-box", marginBottom: 8, fontSize: 13 }} />
         )}
+        {accounts.length > 0 && (
+          <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box", marginBottom: 8, fontSize: 13 }}>
+            <option value="">Unassigned</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        )}
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Save</button>
           <button onClick={() => setEditing(false)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>Cancel</button>
@@ -2382,6 +2434,7 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
   const freq = r.frequency || "monthly";
   const freqLabel = freq === "weekly" ? `Every ${WEEKDAY_LABELS[r.day]}` : `Day ${r.day} of month`;
   const categoryDisplay = r.categoryLabel || r.category;
+  const linkedAccount = r.accountId ? accounts.find((a) => a.id === r.accountId) : null;
 
   return (
     <div style={{
@@ -2390,9 +2443,9 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
     }}>
       <div>
         <div style={{ fontSize: 13.5, fontWeight: 700 }}>{r.name}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1, flexWrap: "wrap" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(r.category) }} />
-          <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}</span>
+          <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}{linkedAccount ? ` · ${linkedAccount.name}` : ""}</span>
         </div>
       </div>
       <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: r.type === "income" ? COLORS.green : COLORS.text }}>
