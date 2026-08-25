@@ -296,10 +296,11 @@ export default function FinanceTracker() {
         if (!r.active) return r;
         if (r.frequency === "weekly") {
           if (r.lastRun === wk) return r;
-          if (today.getDay() === r.day) {
+          const occurrenceDate = addDays(getMonday(today), (r.day + 6) % 7);
+          if (today >= occurrenceDate) {
             newEntries.push({
               id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
-              category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: isoOf(today), recurring: true
+              category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: isoOf(occurrenceDate), recurring: true
             });
             return { ...r, lastRun: wk };
           }
@@ -522,7 +523,7 @@ export default function FinanceTracker() {
   });
 
   return (
-    <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100%", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
+    <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
       <GlobalStyle />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} NAV={NAV} tab={tab} setTab={setTab} profileName={data.profile.name} />
