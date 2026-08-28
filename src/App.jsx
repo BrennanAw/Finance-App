@@ -1411,7 +1411,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     setShared(false); setSharedTotal(""); setDebtors([]);
   };
 
-  const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: todayISO(), debts: null, debtsTotal: null, accountId: form.accountId || null });
+  const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
 
   return (
     <div>
@@ -1421,7 +1421,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
         </button>
       }>
         {editingQuickAdds ? (
-          <QuickAddEditor quickAdds={quickAdds} onUpdate={onUpdateQuickAdd} onRemove={onRemoveQuickAdd} onAdd={onAddQuickAdd} categories={categories} onAddCategory={onAddCategory} />
+          <QuickAddEditor quickAdds={quickAdds} onUpdate={onUpdateQuickAdd} onRemove={onRemoveQuickAdd} onAdd={onAddQuickAdd} categories={categories} accounts={accounts} onAddCategory={onAddCategory} />
         ) : (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {quickAdds.length === 0 && <EmptyNote>No quick adds yet — tap Edit to add one.</EmptyNote>}
@@ -1572,20 +1572,30 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   );
 }
 
-function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, onAddCategory }) {
+function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, accounts, onAddCategory }) {
   return (
     <div>
-      {quickAdds.map((q) => (
-        <div key={q.id} style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr auto", gap: 8, marginBottom: 8, alignItems: "center" }}>
-          <input value={q.label} onChange={(e) => onUpdate(q.id, { label: e.target.value })} style={{ fontSize: 12.5 }} />
-          <input type="number" min="0" step="0.01" value={q.amount} onChange={(e) => onUpdate(q.id, { amount: parseFloat(e.target.value) || 0 })} style={{ fontSize: 12.5 }} className="mono" />
-          <CategorySelect value={q.category} onChange={(c) => onUpdate(q.id, { category: c })} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
-          <button onClick={() => onRemove(q.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-            <Trash2 size={14} />
-          </button>
+      {quickAdds.map((q, i) => (
+        <div key={q.id} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: i === quickAdds.length - 1 ? "none" : "1px solid " + COLORS.border }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr auto", gap: 8, marginBottom: 6 }}>
+            <input value={q.label} onChange={(e) => onUpdate(q.id, { label: e.target.value })} style={{ fontSize: 12.5 }} placeholder="Label" />
+            <input type="number" min="0" step="0.01" value={q.amount} onChange={(e) => onUpdate(q.id, { amount: parseFloat(e.target.value) || 0 })} style={{ fontSize: 12.5 }} className="mono" />
+            <button onClick={() => onRemove(q.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: accounts.length > 0 ? "1fr 1fr" : "1fr", gap: 8 }}>
+            <CategorySelect value={q.category} onChange={(c) => onUpdate(q.id, { category: c })} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
+            {accounts.length > 0 && (
+              <select value={q.accountId || ""} onChange={(e) => onUpdate(q.id, { accountId: e.target.value || null })} style={{ fontSize: 12.5 }}>
+                <option value="">Unassigned</option>
+                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            )}
+          </div>
         </div>
       ))}
-      <button onClick={() => onAdd({ label: "New Quick Add", amount: 0, category: categories.expense[0] })} style={{
+      <button onClick={() => onAdd({ label: "New Quick Add", amount: 0, category: categories.expense[0], accountId: null })} style={{
         background: COLORS.orangeLight, color: COLORS.orangeDark, border: "none", borderRadius: 8,
         padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer"
       }}>+ Add Quick Add</button>
