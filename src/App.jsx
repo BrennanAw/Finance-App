@@ -15,8 +15,8 @@ import {
 /* ---------- design tokens ---------- */
 
 const SHADOW = "0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06)";
-const DEFAULT_THEME = { mode: "light", accent: "#10B981", secondaryAccent: "#3B82F6" };
-const ACCENT_PRESETS = ["#10B981", "#3B82F6", "#8B5CF6", "#F43F5E", "#F59E0B", "#14B8A6", "#6366F1", "#EC4899"];
+const DEFAULT_THEME = { mode: "light", accent: "#749961", secondaryAccent: "#3B82F6" };
+const ACCENT_PRESETS = ["#749961", "#3B82F6", "#8B5CF6", "#F43F5E", "#F59E0B", "#14B8A6", "#6366F1", "#EC4899"];
 
 function hexToRgb(hex) {
   const h = hex.replace("#", "");
