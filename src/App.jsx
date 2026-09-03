@@ -222,6 +222,7 @@ export default function FinanceTracker() {
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [preset, setPreset] = useState({ type: null, token: 0 });
+  const [ledgerPreset, setLedgerPreset] = useState({ period: null, category: null, token: 0 });
   const [openGroup, setOpenGroup] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
@@ -244,6 +245,12 @@ export default function FinanceTracker() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 220);
   };
   useEffect(() => () => { Object.values(toastTimers.current).forEach(clearTimeout); }, []);
+
+  // Start each tab at the top of the page rather than wherever the previous tab
+  // happened to be scrolled to (e.g. after clicking "View all" from partway down the dashboard).
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [tab]);
   const generatedRef = useRef(false);
   const navRef = useRef(null);
 
@@ -410,6 +417,33 @@ export default function FinanceTracker() {
     const item = data.recurring.find((r) => r.id === id);
     setData((prev) => ({ ...prev, recurring: prev.recurring.filter((r) => r.id !== id) }));
     pushToast(`Recurring transaction removed${item ? " — " + item.name : ""}`, "danger", Trash2);
+  };
+
+  const runRecurringNow = (id) => {
+    const r = data.recurring.find((x) => x.id === id);
+    if (!r || !r.active) return;
+    const periodKey = (r.frequency || "monthly") === "weekly" ? isoOf(getMonday(new Date())) : thisMonthKey();
+    if (r.lastRun === periodKey) return;
+    const entry = {
+      id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
+      category: r.category, categoryLabel: r.categoryLabel || "", note: r.name,
+      date: todayISO(), recurring: true, accountId: r.accountId || null
+    };
+    setData((prev) => ({
+      ...prev,
+      entries: [...prev.entries, entry],
+      recurring: prev.recurring.map((x) => x.id === id ? { ...x, lastRun: periodKey } : x)
+    }));
+    pushToast(`${r.name} logged early — ${fmt(r.amount)}`, "success", Zap);
+  };
+
+  const goLedgerFiltered = (period, category) => { setLedgerPreset({ period: period || null, category: category || null, token: Date.now() }); setTab("ledger"); };
+
+  const toggleEntryBudget = (id) => {
+    const entry = data.entries.find((e) => e.id === id);
+    if (!entry) return;
+    setData((prev) => ({ ...prev, entries: prev.entries.map((e) => e.id === id ? { ...e, excludeFromBudget: !e.excludeFromBudget } : e) }));
+    pushToast(entry.excludeFromBudget ? "Back in your budgets" : "Excluded from your budgets", entry.excludeFromBudget ? "success" : "info", Target);
   };
 
   const addAccount = (acc) => {
@@ -595,6 +629,10 @@ export default function FinanceTracker() {
               onQuickAction={goAdd}
               onGoInsights={() => setTab("insights")}
               onGoDebts={() => setTab("debts")}
+              onGoLedger={() => goLedgerFiltered(null, null)}
+              onGoLedgerFiltered={goLedgerFiltered}
+              onGoBudgets={() => setTab("budgets")}
+              onGoRecurring={() => setTab("recurring")}
             />
           )}
           {tab === "accounts" && (
@@ -624,7 +662,7 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} categories={data.categories} accounts={data.accounts} onAddCategory={addCategory} />}
+          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} preset={ledgerPreset} categories={data.categories} accounts={data.accounts} onAddCategory={addCategory} />}
           {tab === "periods" && <Periods entries={data.entries} accounts={data.accounts} />}
           {tab === "insights" && <Insights entries={data.entries} accounts={data.accounts} />}
           {tab === "budgets" && (
@@ -647,6 +685,7 @@ export default function FinanceTracker() {
               onUpdate={updateRecurring}
               onToggle={toggleRecurring}
               onRemove={removeRecurring}
+              onRunNow={runRecurringNow}
               categories={data.categories}
               onAddCategory={addCategory}
               accounts={data.accounts}
@@ -674,7 +713,7 @@ export default function FinanceTracker() {
 
 /* ---------- dashboard ---------- */
 
-function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts }) {
+function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
   const [statScope, setStatScope] = useState("month");
   const cmk = thisMonthKey();
 
@@ -707,7 +746,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
     if (!withMonthly.length) return null;
     const totalLimit = withMonthly.reduce((s, [, p]) => s + p.monthly, 0);
     const cats = withMonthly.map(([c]) => c);
-    const spent = entries.filter((e) => e.type === "expense" && monthKey(e.date) === cmk && cats.includes(e.category)).reduce((s, e) => s + e.amount, 0);
+    const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && monthKey(e.date) === cmk && cats.includes(e.category)).reduce((s, e) => s + e.amount, 0);
     return { pct: totalLimit > 0 ? Math.round((spent / totalLimit) * 100) : 0, spent, totalLimit };
   }, [entries, budgets, cmk]);
 
@@ -728,23 +767,26 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
   const budgetWatch = useMemo(() => {
     const items = [];
     const now = new Date();
+    const ledgerPeriodFor = { daily: "day", weekly: "week", monthly: "month" };
     Object.entries(budgets).forEach(([category, periods]) => {
       Object.entries(periods).forEach(([pt, lim]) => {
         const r = periodRange(pt, now);
-        const spent = entries.filter((e) => e.type === "expense" && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+        const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
         const pct = lim > 0 ? (spent / lim) * 100 : 0;
-        if (pct >= 80) items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim });
+        items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category });
       });
     });
     ["daily", "weekly", "monthly"].forEach((pt) => {
       const lim = masterBudgets[pt];
       if (lim == null) return;
       const r = periodRange(pt, now);
-      const spent = entries.filter((e) => e.type === "expense" && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+      const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
       const pct = lim > 0 ? (spent / lim) * 100 : 0;
-      if (pct >= 80) items.push({ label: `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim });
+      items.push({ label: `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null });
     });
-    return items.sort((a, b) => b.pct - a.pct).slice(0, 5);
+    // Every budget you've set shows up here, sorted by how close it is to its limit —
+    // the ones actually worth watching naturally float to the top.
+    return items.sort((a, b) => b.pct - a.pct);
   }, [entries, budgets, masterBudgets]);
 
   const recent = useMemo(() => (
@@ -803,28 +845,46 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Budget Watch">
+      <SectionCard title="Budget Watch" right={onGoBudgets && (
+        <button onClick={onGoBudgets} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+          View all →
+        </button>
+      )}>
         {budgetWatch.length === 0 ? (
-          <EmptyNote>All budgets on track — nothing near its limit.</EmptyNote>
-        ) : budgetWatch.map((b, i) => (
-          <div key={i} style={{ marginBottom: i === budgetWatch.length - 1 ? 0 : 10 }}>
+          <EmptyNote>No budgets set yet — set one in the Budgets tab.</EmptyNote>
+        ) : budgetWatch.map((b, i) => {
+          const barColor = b.pct >= 100 ? COLORS.rose : b.pct >= 70 ? COLORS.amber : COLORS.green;
+          const remaining = b.lim - b.spent;
+          return (
+          <div key={i} onClick={() => onGoLedgerFiltered && onGoLedgerFiltered(b.ledgerPeriod, b.category)} style={{ marginBottom: i === budgetWatch.length - 1 ? 0 : 10, cursor: onGoLedgerFiltered ? "pointer" : "default" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
               <span style={{ fontWeight: 600 }}>{b.label}</span>
               <span className="mono" style={{ color: b.pct >= 100 ? COLORS.rose : COLORS.muted }}>{fmt(b.spent)} / {fmt(b.lim)}</span>
             </div>
             <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: b.pct >= 100 ? COLORS.rose : COLORS.amber, borderRadius: 4 }} />
+              <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: barColor, borderRadius: 4 }} />
+            </div>
+            <div className="mono" style={{ fontSize: 10.5, marginTop: 3, fontWeight: 600, color: remaining < 0 ? COLORS.rose : COLORS.mutedLight }}>
+              {remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`}
             </div>
           </div>
-        ))}
+          );
+        })}
       </SectionCard>
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Upcoming Recurring">
+      <SectionCard title="Upcoming Recurring" right={onGoRecurring && (
+        <button onClick={onGoRecurring} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+          View all →
+        </button>
+      )}>
         {upcoming.length === 0 && <EmptyNote>No active recurring transactions.</EmptyNote>}
         {upcoming.map((r, i) => (
-          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 2px", borderBottom: i === upcoming.length - 1 ? "none" : "1px solid " + COLORS.border }}>
+          <div key={r.id} onClick={onGoRecurring} style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "9px 2px", borderBottom: i === upcoming.length - 1 ? "none" : "1px solid " + COLORS.border,
+            cursor: onGoRecurring ? "pointer" : "default"
+          }}>
             <span style={{ width: 8, height: 8, borderRadius: 2, background: catColor(r.category) }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
@@ -839,7 +899,11 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Recent Transactions">
+      <SectionCard title="Recent Transactions" right={onGoLedger && (
+        <button onClick={onGoLedger} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+          View all →
+        </button>
+      )}>
         {recent.length === 0 && <EmptyNote>No transactions yet — add your first one above.</EmptyNote>}
         {recent.map((e, i) => <TxRow key={e.id} e={e} last={i === recent.length - 1} accounts={accounts} />)}
       </SectionCard>
@@ -1346,6 +1410,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   const [debtors, setDebtors] = useState([]);
   const [transferFrom, setTransferFrom] = useState("");
   const [transferTo, setTransferTo] = useState("");
+  const [excludeFromBudget, setExcludeFromBudget] = useState(false);
   const [error, setError] = useState("");
   const [editingQuickAdds, setEditingQuickAdds] = useState(false);
 
@@ -1412,9 +1477,9 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     if (!amount || amount <= 0) { setError("Enter an amount greater than zero."); return; }
     if (!form.date) { setError("Pick a date."); return; }
     setError("");
-    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null });
+    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null, excludeFromBudget: form.type === "expense" ? excludeFromBudget : false });
     setForm((f) => ({ ...f, amount: "", note: "" }));
-    setShared(false); setSharedTotal(""); setDebtors([]);
+    setShared(false); setSharedTotal(""); setDebtors([]); setExcludeFromBudget(false);
   };
 
   const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
@@ -1566,6 +1631,15 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
           </div>
         )}
 
+        {form.type === "expense" && (
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.muted, cursor: "pointer", fontWeight: 600 }}>
+              <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 15, height: 15, padding: 0 }} />
+              <Target size={14} /> Don't count this toward my budgets
+            </label>
+          </div>
+        )}
+
         {error && <div style={{ color: COLORS.rose, fontSize: 12.5, marginBottom: 10, fontWeight: 600 }}>{error}</div>}
         <button onClick={submit} style={{
           display: "flex", alignItems: "center", gap: 6, background: COLORS.orange, color: "#fff",
@@ -1581,26 +1655,42 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
 function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, accounts, onAddCategory }) {
   return (
     <div>
-      {quickAdds.map((q, i) => (
-        <div key={q.id} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: i === quickAdds.length - 1 ? "none" : "1px solid " + COLORS.border }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr auto", gap: 8, marginBottom: 6 }}>
-            <input value={q.label} onChange={(e) => onUpdate(q.id, { label: e.target.value })} style={{ fontSize: 12.5 }} placeholder="Label" />
-            <input type="number" min="0" step="0.01" value={q.amount} onChange={(e) => onUpdate(q.id, { amount: parseFloat(e.target.value) || 0 })} style={{ fontSize: 12.5 }} className="mono" />
-            <button onClick={() => onRemove(q.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-              <Trash2 size={14} />
+      {quickAdds.map((q) => {
+        const accent = catColor(q.category);
+        return (
+        <div key={q.id} style={{ marginBottom: 10, padding: 12, borderRadius: 12, border: "1px solid " + COLORS.border, borderLeft: `4px solid ${accent}`, background: COLORS.bg }}>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 10 }}>
+            <span style={{ width: 10, height: 10, minWidth: 10, borderRadius: "50%", background: accent, marginBottom: 11 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <FieldLabel>Label</FieldLabel>
+              <input value={q.label} onChange={(e) => onUpdate(q.id, { label: e.target.value })} style={{ width: "100%", boxSizing: "border-box", fontSize: 13 }} placeholder="Label" />
+            </div>
+            <button onClick={() => onRemove(q.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex", padding: "9px 0" }}>
+              <Trash2 size={15} />
             </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: accounts.length > 0 ? "1fr 1fr" : "1fr", gap: 8 }}>
-            <CategorySelect value={q.category} onChange={(c) => onUpdate(q.id, { category: c })} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
+          <div style={{ display: "grid", gridTemplateColumns: accounts.length > 0 ? "0.8fr 1.2fr 1fr" : "0.8fr 1.2fr", gap: 8 }}>
+            <div>
+              <FieldLabel>Amount (RM)</FieldLabel>
+              <input type="number" min="0" step="0.01" value={q.amount} onChange={(e) => onUpdate(q.id, { amount: parseFloat(e.target.value) || 0 })} style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5 }} className="mono" />
+            </div>
+            <div>
+              <FieldLabel>Category</FieldLabel>
+              <CategorySelect value={q.category} onChange={(c) => onUpdate(q.id, { category: c })} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
+            </div>
             {accounts.length > 0 && (
-              <select value={q.accountId || ""} onChange={(e) => onUpdate(q.id, { accountId: e.target.value || null })} style={{ fontSize: 12.5 }}>
-                <option value="">Unassigned</option>
-                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
+              <div>
+                <FieldLabel>Account</FieldLabel>
+                <select value={q.accountId || ""} onChange={(e) => onUpdate(q.id, { accountId: e.target.value || null })} style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5 }}>
+                  <option value="">Unassigned</option>
+                  {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </div>
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
       <button onClick={() => onAdd({ label: "New Quick Add", amount: 0, category: categories.expense[0], accountId: null })} style={{
         background: COLORS.orangeLight, color: COLORS.orangeDark, border: "none", borderRadius: 8,
         padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer"
@@ -1611,7 +1701,7 @@ function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, acco
 
 /* ---------- ledger ---------- */
 
-function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCategory }) {
+function Ledger({ entries, onRemove, onUpdate, onToggleBudget, preset, categories, accounts, onAddCategory }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [periodType, setPeriodType] = useState("all");
   const [anchor, setAnchor] = useState(new Date());
@@ -1619,6 +1709,20 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
   const [catFilter, setCatFilter] = useState("all");
   const [acctFilter, setAcctFilter] = useState("all");
   const [editingId, setEditingId] = useState(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 20;
+
+  useEffect(() => {
+    if (!preset || !preset.token) return;
+    setPeriodType(preset.period || "all");
+    setAnchor(new Date());
+    setCatFilter(preset.category || "all");
+    setTypeFilter("all");
+    setAcctFilter("all");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset && preset.token]);
+
+  useEffect(() => { setPage(1); }, [periodType, typeFilter, catFilter, acctFilter, anchor]);
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
   const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
@@ -1645,14 +1749,20 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
   ), [entries, periodType, range, typeFilter, catFilter, acctFilter]);
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, totalPages);
+  const pageItems = useMemo(() => (
+    filtered.slice((clampedPage - 1) * PAGE_SIZE, clampedPage * PAGE_SIZE)
+  ), [filtered, clampedPage]);
+
   const groups = useMemo(() => {
     const map = new Map();
-    filtered.forEach((e) => {
+    pageItems.forEach((e) => {
       if (!map.has(e.date)) map.set(e.date, []);
       map.get(e.date).push(e);
     });
     return [...map.entries()];
-  }, [filtered]);
+  }, [pageItems]);
 
   const isCurrentPeriod = periodType === "all" ? true
     : periodType === "day" ? isoOf(anchor) === todayISO()
@@ -1744,10 +1854,22 @@ function Ledger({ entries, onRemove, onUpdate, categories, accounts, onAddCatego
               onSave={(patch) => { onUpdate(e.id, patch); setEditingId(null); }}
               onCancel={() => setEditingId(null)} />
           ) : (
-            <TxRow key={e.id} e={e} last={i === items.length - 1} onRemove={onRemove} onEdit={() => setEditingId(e.id)} hideDate accounts={accounts} />
+            <TxRow key={e.id} e={e} last={i === items.length - 1} onRemove={onRemove} onEdit={() => setEditingId(e.id)} onToggleBudget={onToggleBudget} hideDate accounts={accounts} />
           ))}
         </div>
       ))}
+
+      {totalPages > 1 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 14, paddingTop: 14, borderTop: "1px solid " + COLORS.border }}>
+          <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={clampedPage === 1} style={{
+            ...navBtnStyle, opacity: clampedPage === 1 ? 0.4 : 1, cursor: clampedPage === 1 ? "not-allowed" : "pointer"
+          }} aria-label="Previous page"><ChevronLeft size={15} /></button>
+          <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.muted }}>Page {clampedPage} of {totalPages}</span>
+          <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={clampedPage === totalPages} style={{
+            ...navBtnStyle, opacity: clampedPage === totalPages ? 0.4 : 1, cursor: clampedPage === totalPages ? "not-allowed" : "pointer"
+          }} aria-label="Next page"><ChevronRight size={15} /></button>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -2117,14 +2239,14 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
 
   const spentForCategoryPeriod = (category, periodType) => {
     const r = periodRange(periodType, new Date());
-    return entries.filter((e) => e.type === "expense" && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+    return entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
   };
 
   const masterSpent = useMemo(() => {
     const now = new Date();
     const sumIn = (pt) => {
       const r = periodRange(pt, now);
-      return entries.filter((e) => e.type === "expense" && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+      return entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
     };
     return { daily: sumIn("daily"), weekly: sumIn("weekly"), monthly: sumIn("monthly") };
   }, [entries]);
@@ -2273,7 +2395,7 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove }) {
 
 /* ---------- recurring ---------- */
 
-function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories, onAddCategory, accounts }) {
+function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, categories, onAddCategory, accounts }) {
   const [form, setForm] = useState({ name: "", amount: "", type: "expense", category: categories.expense[0], categoryLabel: "", frequency: "monthly", day: 1, accountId: "" });
   const [error, setError] = useState("");
 
@@ -2362,7 +2484,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories,
           <Plus size={16} /> Add Recurring
         </button>
         <div style={{ fontSize: 11.5, color: COLORS.mutedLight, marginTop: 10 }}>
-          Runs automatically once the app is opened on or after its due day — this needs the app to be opened, since it can't run in the background.
+          Runs automatically once the app is opened on or after its due day — this needs the app to be opened, since it can't run in the background. Need it sooner? Use the lightning bolt on any item below to log it today instead.
         </div>
       </SectionCard>
 
@@ -2371,14 +2493,14 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, categories,
       <SectionCard title="Active Recurring Items">
         {recurring.length === 0 && <EmptyNote>No recurring transactions set up yet.</EmptyNote>}
         {recurring.map((r, i) => (
-          <RecurringRow key={r.id} r={r} onUpdate={onUpdate} onToggle={onToggle} onRemove={onRemove} isLast={i === recurring.length - 1} categories={categories} onAddCategory={onAddCategory} accounts={accounts} />
+          <RecurringRow key={r.id} r={r} onUpdate={onUpdate} onToggle={onToggle} onRemove={onRemove} onRunNow={onRunNow} isLast={i === recurring.length - 1} categories={categories} onAddCategory={onAddCategory} accounts={accounts} />
         ))}
       </SectionCard>
     </div>
   );
 }
 
-function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onAddCategory, accounts }) {
+function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categories, onAddCategory, accounts }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "" });
 
@@ -2451,10 +2573,14 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
   const freqLabel = freq === "weekly" ? `Every ${WEEKDAY_LABELS[r.day]}` : `Day ${r.day} of month`;
   const categoryDisplay = r.categoryLabel || r.category;
   const linkedAccount = r.accountId ? accounts.find((a) => a.id === r.accountId) : null;
+  const periodKey = freq === "weekly" ? isoOf(getMonday(new Date())) : thisMonthKey();
+  const alreadyRun = r.lastRun === periodKey;
+  const runDisabled = !r.active || alreadyRun;
+  const runTitle = !r.active ? "Resume it first to log early" : alreadyRun ? "Already logged this period" : "Log it today, ahead of its due date";
 
   return (
     <div style={{
-      display: "grid", gridTemplateColumns: "1fr auto auto auto auto", alignItems: "center", gap: 8,
+      display: "grid", gridTemplateColumns: "1fr auto auto auto auto auto", alignItems: "center", gap: 8,
       padding: "11px 4px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border, opacity: r.active ? 1 : 0.45
     }}>
       <div>
@@ -2467,6 +2593,11 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, isLast, categories, onA
       <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: r.type === "income" ? COLORS.green : COLORS.text }}>
         {r.type === "income" ? "+" : "−"}{fmt(r.amount)}
       </div>
+      <button onClick={() => !runDisabled && onRunNow(r.id)} disabled={runDisabled} title={runTitle} style={{
+        background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
+        color: runDisabled ? COLORS.mutedLight : COLORS.blue, opacity: runDisabled ? 0.5 : 1,
+        cursor: runDisabled ? "not-allowed" : "pointer", padding: "5px 7px", display: "flex"
+      }}><Zap size={13} /></button>
       <button onClick={() => setEditing(true)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.muted, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
         <Pencil size={13} />
       </button>
@@ -2822,6 +2953,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
   const [accountId, setAccountId] = useState(entry.accountId || "");
   const [fromAccountId, setFromAccountId] = useState(entry.fromAccountId || "");
   const [toAccountId, setToAccountId] = useState(entry.toAccountId || "");
+  const [excludeFromBudget, setExcludeFromBudget] = useState(!!entry.excludeFromBudget);
   const [error, setError] = useState("");
 
   const save = () => {
@@ -2833,7 +2965,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
       if (fromAccountId === toAccountId) { setError("Pick two different accounts."); return; }
       onSave({ amount: amt, date, note: note.trim(), fromAccountId, toAccountId });
     } else {
-      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null });
+      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null, excludeFromBudget: entry.type === "expense" ? excludeFromBudget : false });
     }
   };
 
@@ -2863,6 +2995,12 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
         )}
         <input type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ fontSize: 13, gridColumn: "1 / -1" }} />
       </div>
+      {entry.type === "expense" && (
+        <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: COLORS.muted, cursor: "pointer", fontWeight: 600, marginBottom: 8 }}>
+          <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 14, height: 14, padding: 0 }} />
+          Don't count toward my budgets
+        </label>
+      )}
       {entry.debts && entry.debts.length > 0 && (
         <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 8 }}>
           This transaction has shared-cost details attached — those aren't editable here, only the base fields above.
@@ -2877,8 +3015,9 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
   );
 }
 
-function TxRow({ e, last, onRemove, onEdit, hideDate, accounts }) {
-  const cols = [hideDate ? null : "56px", "1fr", "auto", onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
+function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }) {
+  const showBudgetToggle = onToggleBudget && e.type === "expense";
+  const cols = [hideDate ? null : "56px", "1fr", "auto", showBudgetToggle ? "26px" : null, onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
   const badge = debtBadgeText(e);
   const isTransfer = e.type === "transfer";
 
@@ -2910,12 +3049,20 @@ function TxRow({ e, last, onRemove, onEdit, hideDate, accounts }) {
             <span style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
             {badge && <Badge>{badge}</Badge>}
             {e.recurring && <Badge>Recurring</Badge>}
+            {e.excludeFromBudget && <Badge>No budget</Badge>}
           </div>
         </div>
       </div>
       <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: isTransfer ? COLORS.blue : e.type === "income" ? COLORS.green : COLORS.text, textAlign: "right", whiteSpace: "nowrap" }}>
         {isTransfer ? "⇄ " : e.type === "income" ? "+" : "−"}{fmt(e.amount)}
       </div>
+      {showBudgetToggle && (
+        <button onClick={() => onToggleBudget(e.id)} title={e.excludeFromBudget ? "Excluded from budget — click to include" : "In budget — click to exclude"} style={{
+          background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
+          color: e.excludeFromBudget ? COLORS.mutedLight : COLORS.green,
+          cursor: "pointer", padding: "5px 7px", display: "flex"
+        }}><Target size={13} /></button>
+      )}
       {onEdit && (
         <button onClick={() => onEdit(e)} aria-label="Edit entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
           <Pencil size={14} />
