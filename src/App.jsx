@@ -488,6 +488,11 @@ export default function FinanceTracker() {
 
   const setProfile = (patch) => setData((prev) => ({ ...prev, profile: { ...prev.profile, ...patch } }));
 
+  const resetAllData = () => {
+    setData(emptyData());
+    pushToast("All account data has been reset", "danger", Trash2);
+  };
+
   // Recompute the shared color palette synchronously during render so every
   // child (which reads the module-level COLORS object) sees the new theme
   // the moment it renders, without needing to thread it through props.
@@ -658,6 +663,7 @@ export default function FinanceTracker() {
               onRenameCategory={renameCategory}
               onDeleteCategory={deleteCategory}
               onAddCategory={addCategory}
+              onResetAll={resetAllData}
             />
           )}
         </div>
@@ -2640,7 +2646,7 @@ function AccentColorPicker({ value, onChange }) {
   );
 }
 
-function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory }) {
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onResetAll }) {
   const [name, setName] = useState(profile.name);
 
   useEffect(() => { setName(profile.name); }, [profile.name]);
@@ -2730,7 +2736,67 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
       <div style={{ height: 16 }} />
 
       <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} />
+
+      <div style={{ height: 16 }} />
+
+      <DangerZone onResetAll={onResetAll} />
     </div>
+  );
+}
+
+function DangerZone({ onResetAll }) {
+  const [confirming, setConfirming] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const canConfirm = confirmText.trim().toUpperCase() === "RESET";
+
+  const cancel = () => { setConfirming(false); setConfirmText(""); };
+  const doReset = () => {
+    if (!canConfirm) return;
+    onResetAll();
+    cancel();
+  };
+
+  return (
+    <SectionCard title="Danger Zone" icon={<Trash2 size={13} />}>
+      <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+        Permanently erase every transaction, account, budget, recurring item, quick add, and category customization on your account. Your sign-in stays active, but this cannot be undone.
+      </div>
+
+      {!confirming ? (
+        <button onClick={() => setConfirming(true)} style={{
+          background: COLORS.roseLight, color: COLORS.rose, border: "1px solid " + COLORS.rose,
+          borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer"
+        }}>
+          Reset Account Data
+        </button>
+      ) : (
+        <div style={{ border: "1px solid " + COLORS.rose, borderRadius: 12, padding: 14, background: COLORS.roseLight }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.rose, marginBottom: 8 }}>
+            This deletes everything and can't be undone.
+          </div>
+          <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>
+            Type <strong>RESET</strong> below to confirm.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input type="text" autoFocus value={confirmText} onChange={(e) => setConfirmText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") doReset(); if (e.key === "Escape") cancel(); }}
+              placeholder="RESET" style={{ flex: 1, minWidth: 120 }} />
+            <button onClick={doReset} disabled={!canConfirm} style={{
+              background: canConfirm ? COLORS.rose : COLORS.border, color: "#fff", border: "none",
+              borderRadius: 10, padding: "0 16px", fontWeight: 700, fontSize: 13, cursor: canConfirm ? "pointer" : "not-allowed"
+            }}>
+              Confirm Reset
+            </button>
+            <button onClick={cancel} style={{
+              background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: "0 16px",
+              fontWeight: 700, fontSize: 13, cursor: "pointer", color: COLORS.muted
+            }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </SectionCard>
   );
 }
 
