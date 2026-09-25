@@ -9,7 +9,7 @@ import {
   LayoutDashboard, List, PiggyBank, Repeat, Users, Zap, Power,
   CalendarDays, ChevronLeft, ChevronRight, Target, BarChart3, Sparkles,
   Landmark, Banknote, CreditCard, CircleDollarSign, HandCoins, Pencil, Check,
-  Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag
+  Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag, Upload
 } from "lucide-react";
 
 /* ---------- design tokens ---------- */
@@ -69,6 +69,16 @@ const CAT_COLORS = {
   Bills: "#F43F5E", Shopping: "#EC4899", Health: "#14B8A6", Entertainment: "#6366F1", Other: "#94A3B8",
   Salary: "#16A34A", Freelance: "#06B6D4", Gift: "#F472B6", Investment: "#FACC15"
 };
+// Curated swatches offered in the category color picker (Settings).
+const CATEGORY_COLOR_PRESETS = [
+  "#FF7A3D", "#FBBF24", "#3B82F6", "#8B5CF6", "#F43F5E", "#EC4899", "#14B8A6", "#6366F1",
+  "#94A3B8", "#16A34A", "#06B6D4", "#F472B6", "#FACC15", "#DC2626", "#22C55E", "#0EA5E9"
+];
+// User-chosen category color overrides, keyed by category name. Kept as a
+// mutable module-level object (mirroring how COLORS holds the live theme)
+// so every component that calls catColor() sees the latest picks without
+// threading them through props. Synced from data.categoryColors on render.
+let CATEGORY_COLOR_OVERRIDES = {};
 const QUICK_ADD_DEFAULTS = [
   { id: "qa1", label: "Grab Ride", amount: 12, category: "Transport" },
   { id: "qa2", label: "Kopitiam", amount: 8, category: "Food" },
@@ -102,6 +112,327 @@ const monthKey = (dateStr) => dateStr.slice(0, 7);
 const thisMonthKey = () => todayISO().slice(0, 7);
 const monthLabel = (mk) => new Date(mk + "-02").toLocaleDateString("en-MY", { month: "long", year: "numeric" });
 const daysInMonth = (year, month1to12) => new Date(year, month1to12, 0).getDate();
+
+// Word → category guesses for the quick-entry parser and CSV import. Keys are
+// category names; a match anywhere (case-insensitive) in the free-text note
+// picks that category, unless the text already names an existing category or
+// quick add directly.
+const CATEGORY_KEYWORDS = {
+  Food: ["food", "lunch", "dinner", "breakfast", "brunch", "eat", "restaurant", "kopitiam", "meal", "snack", "cafe", "coffee", "makan", "mamak"],
+  Groceries: ["grocery", "groceries", "mart", "supermarket", "market", "tesco", "giant", "lotus", "jaya grocer", "aeon"],
+  Transport: ["grab", "taxi", "lrt", "mrt", "bus", "train", "petrol", "fuel", "parking", "transport", "ride", "toll", "touch n go", "gojek"],
+  Rent: ["rent", "rental"],
+  Bills: ["bill", "bills", "electricity", "water bill", "wifi", "phone bill", "internet", "utility", "utilities", "astro", "unifi"],
+  Shopping: ["shop", "shopping", "clothes", "shoes", "mall", "shopee", "lazada", "amazon"],
+  Health: ["doctor", "clinic", "pharmacy", "medicine", "health", "hospital", "dentist", "guardian", "watsons"],
+  Entertainment: ["movie", "netflix", "spotify", "game", "cinema", "concert", "entertainment", "gsc", "tgv", "steam"],
+  Salary: ["salary", "payslip", "payroll", "wages"],
+  Freelance: ["freelance", "gig", "project", "client", "invoice"],
+  Gift: ["gift", "present", "angpau", "ang pau", "duit raya"],
+  Investment: ["dividend", "invest", "investment", "stock", "crypto", "unit trust"],
+};
+
+// Parses a shorthand line like "20 lunch", "grab 12", or "+500 salary" into a
+// ready-to-log entry. Returns null if no amount could be found. Prefixing
+// with "+", or the text matching an income-ish keyword, logs it as income.
+// Formats free-typed digits as currency-style cents entry, the way a POS
+// terminal does: typing "1250" yields "12.50" without needing to type a
+// decimal point. Non-digit characters (including any "." the user types)
+// are ignored; the last two digits typed are always the cents.
+function formatCentsInput(raw) {
+  const digits = (raw || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const cents = parseInt(digits, 10);
+  return (cents / 100).toFixed(2);
+}
+
+function parseQuickEntry(text, categories, quickAdds) {
+  const raw = (text || "").trim();
+  if (!raw) return null;
+  const amountMatch = raw.match(/\d+(?:\.\d{1,2})?/);
+  if (!amountMatch) return null;
+  const amount = parseFloat(amountMatch[0]);
+  if (!amount || amount <= 0) return null;
+
+  let rest = (raw.slice(0, amountMatch.index) + " " + raw.slice(amountMatch.index + amountMatch[0].length))
+    .replace(/^[+-]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const isIncome = raw.trim().startsWith("+") || /\b(income|got paid|received|payout)\b/i.test(rest);
+  const type = isIncome ? "income" : "expense";
+  const catList = type === "income" ? categories.income : categories.expense;
+  const lower = rest.toLowerCase();
+
+  const quickMatch = rest && quickAdds.find((q) => q.label && lower.includes(q.label.toLowerCase()));
+  let category = catList.find((c) => c !== "Other" && lower.includes(c.toLowerCase()));
+  if (!category) {
+    for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+      if (catList.includes(cat) && keywords.some((k) => lower.includes(k))) { category = cat; break; }
+    }
+  }
+  if (!category && quickMatch) category = quickMatch.category;
+  if (!category) category = "Other";
+
+  return { type, amount, category, note: rest || category, accountId: quickMatch ? quickMatch.accountId || null : null };
+}
+
+// ---- CSV bank-statement import ----
+// Parses raw CSV text into rows of string arrays, honoring quoted fields
+// (including embedded commas and escaped "" quotes).
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ",") pushField();
+      else if (c === "\n") { if (field !== "" || row.length) pushRow(); }
+      else if (c === "\r") { /* skip */ }
+      else field += c;
+    }
+  }
+  if (field !== "" || row.length) pushRow();
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+}
+
+// Finds the column index whose header best matches one of the given
+// keywords (exact match first, then substring match).
+function guessColumnIndex(headers, keywords) {
+  const lower = headers.map((h) => (h || "").toLowerCase().trim());
+  for (const kw of keywords) {
+    const idx = lower.findIndex((h) => h === kw);
+    if (idx !== -1) return idx;
+  }
+  for (const kw of keywords) {
+    const idx = lower.findIndex((h) => h.includes(kw));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+// Parses common bank date formats (YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY,
+// DD-MM-YYYY, "12 Jan 2026") into an ISO yyyy-mm-dd string, or null.
+function parseDate(raw) {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    let [, a, b, y] = m;
+    if (y.length === 2) y = (Number(y) < 70 ? "20" : "19") + y;
+    let day = Number(a), month = Number(b);
+    if (month > 12 && day <= 12) { [day, month] = [month, day]; }
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return isoOf(d);
+  return null;
+}
+
+// Bank statements often wrap each transaction's description across several
+// lines and pad it with a generic, repeated transaction-type label (e.g.
+// "SALE DEBIT", "IBK FUND TFR FR A/C", "DUITNOW QR") rather than putting the
+// merchant/payee name front and center. These helpers dig the actual name
+// out from that noise instead of importing the generic label as the note.
+const STATEMENT_NOISE_LINES = [
+  "sale debit", "sale credit", "pos debit", "pos credit", "pos purchase", "purchase",
+  "debit advice", "credit advice", "cash withdrawal", "cash deposit", "cheque deposit",
+  "atm withdrawal", "interbank giro", "ibg fund transfer", "duitnow transfer",
+  "duitnow qr", "duitnow qr-", "online transfer", "instant transfer", "fpx payment",
+  "standing instruction", "salary credit", "interest credit", "service charge", "bill payment",
+];
+const STATEMENT_NOISE_PREFIXES = ["ibk fund tfr", "duitnow qr", "fpx ", "ibg "];
+
+function isStatementNoiseLine(line) {
+  const norm = line.toLowerCase().replace(/[-*]+$/, "").trim();
+  if (!norm) return true;
+  if (STATEMENT_NOISE_LINES.includes(norm)) return true;
+  if (STATEMENT_NOISE_PREFIXES.some((p) => norm.startsWith(p))) return true;
+  return false;
+}
+
+// Picks the merchant/payee name out of a transaction's description lines.
+// Many banks mark the card-acceptor or payee name with a trailing "*" —
+// that line wins when present. Otherwise, the first line that isn't a
+// recognized generic type label (see above) is used. Returns "" if every
+// line looks like noise, so the caller can fall back to its own default.
+function extractMerchantLine(candidateLines) {
+  const lines = candidateLines.map((l) => l.trim()).filter(Boolean);
+  const starred = lines.find((l) => /\*\s*$/.test(l));
+  if (starred) return starred.replace(/\*\s*$/, "").trim();
+  const content = lines.find((l) => !isStatementNoiseLine(l));
+  return content ? content.trim() : "";
+}
+
+// Converts parsed CSV rows (first row = header) into ready-to-import entry
+// drafts. Handles either a single signed "Amount" column or separate
+// Debit/Credit columns. Returns [] if it can't find date/amount columns.
+function parseCsvToEntries(rows, categories, quickAdds) {
+  if (!rows.length) return [];
+  const [header, ...body] = rows;
+  const dateIdx = guessColumnIndex(header, ["date", "transaction date", "posting date", "value date"]);
+  const descIdx = guessColumnIndex(header, ["description", "narrative", "details", "particulars", "remarks", "memo"]);
+  const amountIdx = guessColumnIndex(header, ["amount", "value"]);
+  const debitIdx = guessColumnIndex(header, ["debit", "withdrawal", "money out", "paid out"]);
+  const creditIdx = guessColumnIndex(header, ["credit", "deposit", "money in", "paid in"]);
+  if (dateIdx === -1 || (amountIdx === -1 && debitIdx === -1 && creditIdx === -1)) return [];
+
+  return body.map((cols) => {
+    const date = parseDate(cols[dateIdx]);
+    // A description cell can be a single line ("MUJI - IOI MALL PUC") or,
+    // when a statement is exported with its original multi-line layout
+    // intact, several lines mixing a generic type label with the actual
+    // merchant name — pull the merchant out rather than using it as-is.
+    const rawDesc = descIdx !== -1 ? (cols[descIdx] || "").trim() : "";
+    const descLines = rawDesc.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const desc = descLines.length > 1 ? (extractMerchantLine(descLines) || descLines[0]) : rawDesc;
+    let amount = 0, type = "expense";
+    if (amountIdx !== -1) {
+      const rawAmount = (cols[amountIdx] || "").trim();
+      // Some statements sign the amount with a trailing "+"/"-" (e.g.
+      // "72.60-") rather than (or in addition to) a leading one — check
+      // both ends before falling back to plain magnitude.
+      const trailingSign = /-\s*$/.test(rawAmount) ? "-" : /\+\s*$/.test(rawAmount) ? "+" : null;
+      const leadingNegative = /^\s*-/.test(rawAmount);
+      amount = parseFloat(rawAmount.replace(/[^0-9.]/g, "")) || 0;
+      type = (trailingSign === "-" || leadingNegative) ? "expense" : trailingSign === "+" ? "income" : (amount < 0 ? "expense" : "income");
+      amount = Math.abs(amount);
+    } else {
+      const debit = parseFloat((cols[debitIdx] || "").replace(/[^0-9.\-]/g, "")) || 0;
+      const credit = parseFloat((cols[creditIdx] || "").replace(/[^0-9.\-]/g, "")) || 0;
+      if (credit > 0) { amount = credit; type = "income"; }
+      else { amount = debit; type = "expense"; }
+    }
+    if (!date || !amount) return null;
+
+    const catList = type === "income" ? categories.income : categories.expense;
+    const lower = desc.toLowerCase();
+    const quickMatch = lower && quickAdds.find((q) => q.label && lower.includes(q.label.toLowerCase()));
+    let category = catList.find((c) => c !== "Other" && lower.includes(c.toLowerCase()));
+    if (!category) {
+      for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+        if (catList.includes(cat) && keywords.some((k) => lower.includes(k))) { category = cat; break; }
+      }
+    }
+    if (!category && quickMatch) category = quickMatch.category;
+    if (!category) category = "Other";
+
+    return { date, type, amount, category, note: desc || category, include: true };
+  }).filter(Boolean);
+}
+
+// ---- PDF bank-statement import ----
+// Extracts text from a PDF, page by page, grouping text fragments into
+// lines by their vertical position so words on the same row stay together
+// (pdf.js reports text as many small positioned fragments, not lines).
+async function extractPdfText(file) {
+  const pdfjsLib = await import("pdfjs-dist");
+  const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const lines = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const rows = new Map();
+    content.items.forEach((item) => {
+      const y = Math.round(item.transform[5]);
+      if (!rows.has(y)) rows.set(y, []);
+      rows.get(y).push(item);
+    });
+    const sortedYs = [...rows.keys()].sort((a, b) => b - a);
+    sortedYs.forEach((y) => {
+      const rowItems = rows.get(y).sort((a, b) => a.transform[4] - b.transform[4]);
+      lines.push(rowItems.map((it) => it.str).join(" ").replace(/\s+/g, " ").trim());
+    });
+  }
+  return lines.filter((l) => l);
+}
+
+// Parses lines of extracted bank-statement text into ready-to-import entry
+// drafts. Best-effort: looks for a leading date on each line, then the
+// first money-like number after it as the amount (a further number, such
+// as a running balance, is ignored). A statement often wraps the rest of
+// that transaction's detail — the actual merchant name, its location, a
+// repeated type label — across the following lines rather than fitting it
+// all on the dated line, so those are scanned too and the merchant/payee
+// name (see extractMerchantLine) wins over a generic type label like "SALE
+// DEBIT". Works well for plain-text statement layouts; less reliably for
+// unusual column layouts, and not at all for scanned/image PDFs.
+function parseStatementLines(lines, categories, quickAdds) {
+  const dateAtStart = /^(\d{4}-\d{2}-\d{2}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})\b/;
+  const moneyToken = /-?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\s*(DR|CR)?\b/gi;
+
+  const results = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const dateMatch = line.match(dateAtStart);
+    if (!dateMatch) continue;
+    const date = parseDate(dateMatch[1]);
+    if (!date) continue;
+
+    const rest = line.slice(dateMatch[0].length).trim();
+    const numbers = [...rest.matchAll(moneyToken)].filter((m) => m[0].replace(/[^0-9.]/g, "").length > 0);
+    if (!numbers.length) continue;
+
+    const first = numbers[0];
+    const inlineDesc = rest.slice(0, first.index).replace(/[\s,.\-|]+$/, "").trim();
+    const amountStr = first[0].replace(/,/g, "").trim();
+    const isCr = /DR$/i.test(amountStr) ? false : /CR$/i.test(amountStr);
+    const isDr = /DR$/i.test(amountStr);
+    const explicitNegative = /^-/.test(amountStr);
+    // Some statements sign the amount with a trailing "+"/"-" straight
+    // after the number (e.g. "72.60-", "137.50+") instead of a leading one.
+    const afterNumber = rest.slice(first.index + first[0].length);
+    const trailingSignMatch = afterNumber.match(/^\s*([+-])/);
+    const trailingSign = trailingSignMatch ? trailingSignMatch[1] : null;
+    const amount = Math.abs(parseFloat(amountStr.replace(/[^0-9.\-]/g, "")) || 0);
+    if (!amount) continue;
+
+    // The actual merchant/payee name usually lives on the lines that follow
+    // the dated line, up until the next transaction's date — not in the
+    // generic type label caught above.
+    const extraLines = [];
+    for (let j = i + 1; j < lines.length && !dateAtStart.test(lines[j]); j++) extraLines.push(lines[j]);
+    const merchant = extractMerchantLine([inlineDesc, ...extraLines]);
+    const desc = merchant || inlineDesc;
+
+    const lower = (desc + " " + inlineDesc + " " + line).toLowerCase();
+    let type;
+    if (explicitNegative || isDr || trailingSign === "-") type = "expense";
+    else if (isCr || trailingSign === "+") type = "income";
+    else type = /\b(credit|salary|deposit|refund|received|payout|incoming transfer)\b/.test(lower) ? "income" : "expense";
+
+    const catList = type === "income" ? categories.income : categories.expense;
+    const lowerDesc = desc.toLowerCase();
+    const quickMatch = lowerDesc && quickAdds.find((q) => q.label && lowerDesc.includes(q.label.toLowerCase()));
+    let category = catList.find((c) => c !== "Other" && lowerDesc.includes(c.toLowerCase()));
+    if (!category) {
+      for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+        if (catList.includes(cat) && keywords.some((k) => lowerDesc.includes(k))) { category = cat; break; }
+      }
+    }
+    if (!category && quickMatch) category = quickMatch.category;
+    if (!category) category = "Other";
+
+    results.push({ date, type, amount, category, note: desc || category, include: true });
+  }
+  return results;
+}
 
 const parseLocal = (dateStr) => new Date(dateStr + "T00:00:00");
 const isoOf = (d) => {
@@ -141,6 +472,18 @@ function shiftAnchor(periodType, anchor, dir) {
   if (periodType === "daily") return addDays(anchor, dir);
   if (periodType === "weekly") return addDays(anchor, dir * 7);
   return addMonths(anchor, dir);
+}
+// Renders a start/end ISO date pair as a compact human range, e.g.
+// "1 Sep 2026" for a single day, "1 – 7 Sep 2026" within a month, or
+// "28 Sep – 4 Oct 2026" spanning two months. Used to show budget periods'
+// exact dates rather than just their period name.
+function formatDateRange(startIso, endIso) {
+  const s = parseLocal(startIso), e = parseLocal(endIso);
+  if (startIso === endIso) return s.toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" });
+  const sameMonth = s.getMonth() === e.getMonth() && s.getFullYear() === e.getFullYear();
+  return sameMonth
+    ? `${s.toLocaleDateString("en-MY", { day: "numeric" })} – ${e.toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })}`
+    : `${s.toLocaleDateString("en-MY", { day: "numeric", month: "short" })} – ${e.toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })}`;
 }
 function greetingWord() {
   const h = new Date().getHours();
@@ -196,13 +539,14 @@ function hashColor(name) {
   return palette[hash % palette.length];
 }
 function catColor(name) {
-  return CAT_COLORS[name] || hashColor(name);
+  return CATEGORY_COLOR_OVERRIDES[name] || CAT_COLORS[name] || hashColor(name);
 }
 
 function emptyData() {
   return {
     entries: [], budgets: {}, recurring: [], masterBudgets: {}, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
     categories: { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
+    categoryColors: {},
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
@@ -268,6 +612,7 @@ export default function FinanceTracker() {
             accounts: parsed.accounts || [],
             quickAdds: parsed.quickAdds || QUICK_ADD_DEFAULTS,
             categories: parsed.categories || { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
+            categoryColors: parsed.categoryColors || {},
             theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
             profile: parsed.profile || { name: "" }
           });
@@ -350,6 +695,14 @@ export default function FinanceTracker() {
   const updateEntry = (id, patch) => {
     setData((prev) => ({ ...prev, entries: prev.entries.map((e) => e.id === id ? { ...e, ...patch } : e) }));
     pushToast("Transaction updated", "info", Pencil);
+  };
+  const bulkAddEntries = (newEntries) => {
+    if (!newEntries || !newEntries.length) return;
+    setData((prev) => ({
+      ...prev,
+      entries: [...prev.entries, ...newEntries.map((entry) => ({ id: uid(), createdAt: Date.now(), ...entry }))],
+    }));
+    pushToast(`Imported ${newEntries.length} transaction${newEntries.length === 1 ? "" : "s"}`, "success", Upload);
   };
 
   const setDebtSettled = (entryId, debtId, settled) => {
@@ -499,7 +852,13 @@ export default function FinanceTracker() {
         delete budgets[oldName];
         budgets[trimmed] = { ...(budgets[trimmed] || {}), ...val };
       }
-      return { ...prev, categories: { ...prev.categories, [type]: list }, entries, recurring, quickAdds, budgets };
+      let categoryColors = prev.categoryColors;
+      if (categoryColors && categoryColors[oldName] != null) {
+        categoryColors = { ...categoryColors };
+        categoryColors[trimmed] = categoryColors[oldName];
+        delete categoryColors[oldName];
+      }
+      return { ...prev, categories: { ...prev.categories, [type]: list }, entries, recurring, quickAdds, budgets, categoryColors };
     });
     pushToast(`Renamed "${oldName}" to "${trimmed}"`, "success", Pencil);
   };
@@ -509,11 +868,52 @@ export default function FinanceTracker() {
       pushToast("You need at least one category", "danger", Trash2);
       return;
     }
-    setData((prev) => ({ ...prev, categories: { ...prev.categories, [type]: prev.categories[type].filter((c) => c !== name) } }));
+    setData((prev) => {
+      const categoryColors = { ...(prev.categoryColors || {}) };
+      delete categoryColors[name];
+      return { ...prev, categories: { ...prev.categories, [type]: prev.categories[type].filter((c) => c !== name) }, categoryColors };
+    });
     pushToast(`Category "${name}" removed`, "danger", Trash2);
   };
 
+  const setCategoryColor = (name, hex) => {
+    setData((prev) => ({ ...prev, categoryColors: { ...(prev.categoryColors || {}), [name]: hex } }));
+  };
+
+  const resetCategoryColor = (name) => {
+    setData((prev) => {
+      const categoryColors = { ...(prev.categoryColors || {}) };
+      delete categoryColors[name];
+      return { ...prev, categoryColors };
+    });
+  };
+
   const goAdd = (type) => { setPreset({ type, token: Date.now() }); setTab("add"); };
+
+  // Handle PWA home-screen shortcuts (long-press the app icon) and any other
+  // deep link that arrives as a URL param — runs once the account's data has
+  // loaded, since quick-add shortcuts need to look up quickAdds by label.
+  useEffect(() => {
+    if (!loaded) return;
+    const params = new URLSearchParams(window.location.search);
+    const action = params.get("action");
+    const quickaddLabel = params.get("quickadd");
+    if (!action && !quickaddLabel) return;
+
+    if (action === "addExpense") goAdd("expense");
+    else if (action === "addIncome") goAdd("income");
+    else if (quickaddLabel) {
+      const q = data.quickAdds.find((item) => item.label.toLowerCase() === quickaddLabel.toLowerCase());
+      if (q) {
+        addEntry({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
+      } else {
+        pushToast(`No quick add named "${quickaddLabel}" — add one in Quick Add first`, "danger", Zap);
+        setTab("add");
+      }
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
 
   const setTheme = (patch) => {
     setData((prev) => ({ ...prev, theme: { ...prev.theme, ...patch } }));
@@ -533,6 +933,12 @@ export default function FinanceTracker() {
   useMemo(() => {
     Object.assign(COLORS, buildPalette(data.theme.mode, data.theme.accent, data.theme.secondaryAccent));
   }, [data.theme.mode, data.theme.accent, data.theme.secondaryAccent]);
+
+  // Same trick for category colors: keep the module-level override map in
+  // sync with the account's saved choices before anything renders.
+  useMemo(() => {
+    CATEGORY_COLOR_OVERRIDES = data.categoryColors || {};
+  }, [data.categoryColors]);
 
   const NAV = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -662,7 +1068,7 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} preset={ledgerPreset} categories={data.categories} accounts={data.accounts} onAddCategory={addCategory} />}
+          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} onBulkAdd={bulkAddEntries} preset={ledgerPreset} categories={data.categories} accounts={data.accounts} quickAdds={data.quickAdds} onAddCategory={addCategory} />}
           {tab === "periods" && <Periods entries={data.entries} accounts={data.accounts} />}
           {tab === "insights" && <Insights entries={data.entries} accounts={data.accounts} />}
           {tab === "budgets" && (
@@ -702,6 +1108,8 @@ export default function FinanceTracker() {
               onRenameCategory={renameCategory}
               onDeleteCategory={deleteCategory}
               onAddCategory={addCategory}
+              onSetCategoryColor={setCategoryColor}
+              onResetCategoryColor={resetCategoryColor}
               onResetAll={resetAllData}
             />
           )}
@@ -1150,9 +1558,7 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
           </div>
           <div>
             <FieldLabel>Type</FieldLabel>
-            <select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }}>
-              {ACCOUNT_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-            </select>
+            <AccountTypeSelect value={form.type} onChange={(id) => setForm((f) => ({ ...f, type: id }))} />
           </div>
           <div>
             <FieldLabel>Initial Balance (RM)</FieldLabel>
@@ -1208,9 +1614,7 @@ function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
       <div style={{ padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, marginBottom: 8 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} style={{ fontSize: 13 }} />
-          <select value={type} onChange={(e) => setType(e.target.value)} style={{ fontSize: 13 }}>
-            {ACCOUNT_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
+          <AccountTypeSelect value={type} onChange={setType} compact />
         </div>
         {type === "other" && (
           <input placeholder="Custom type label (optional)" value={customType} onChange={(e) => setCustomType(e.target.value)}
@@ -1302,10 +1706,9 @@ function DebtRow({ d, accounts, last, onSetDebtSettled, onLogAsIncome }) {
       {picking && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 10 }}>
           <span style={{ fontSize: 12, color: COLORS.muted, fontWeight: 600, whiteSpace: "nowrap" }}>Deposit into</span>
-          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>
-            <option value="">Unassigned</option>
-            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <AccountSelect value={accountId} onChange={setAccountId} accounts={accounts} allowUnassigned compact />
+          </div>
           <button onClick={confirm} style={{ background: COLORS.green, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
             Confirm
           </button>
@@ -1413,6 +1816,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   const [excludeFromBudget, setExcludeFromBudget] = useState(false);
   const [error, setError] = useState("");
   const [editingQuickAdds, setEditingQuickAdds] = useState(false);
+  const [quickEntryText, setQuickEntryText] = useState("");
 
   useEffect(() => {
     if (accounts.length > 0) {
@@ -1482,10 +1886,60 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     setShared(false); setSharedTotal(""); setDebtors([]); setExcludeFromBudget(false);
   };
 
-  const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
+  const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: form.date || todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
+
+  const submitQuickEntry = () => {
+    const parsed = parseQuickEntry(quickEntryText, categories, quickAdds);
+    if (!parsed) return;
+    onAdd({
+      type: parsed.type, amount: parsed.amount, category: parsed.category, note: parsed.note,
+      date: form.date || todayISO(), debts: null, debtsTotal: null,
+      accountId: parsed.accountId || form.accountId || null,
+      excludeFromBudget: false,
+    });
+    setQuickEntryText("");
+  };
+
+  const quickEntryPreview = quickEntryText.trim() ? parseQuickEntry(quickEntryText, categories, quickAdds) : null;
 
   return (
     <div>
+      <SectionCard title="Quick Entry" icon={<Sparkles size={13} />}>
+        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>
+          Type an amount and a word or two, then hit Enter — e.g. "20 lunch", "grab 12", or "+500 salary" for income.
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            type="text"
+            placeholder="e.g. 20 lunch"
+            value={quickEntryText}
+            onChange={(e) => setQuickEntryText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && quickEntryPreview) submitQuickEntry(); }}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button onClick={submitQuickEntry} disabled={!quickEntryPreview} style={{
+            display: "flex", alignItems: "center", gap: 6, background: quickEntryPreview ? COLORS.orange : COLORS.border,
+            color: "#fff", border: "none", borderRadius: 10, padding: "0 16px", fontWeight: 700, fontSize: 13.5,
+            cursor: quickEntryPreview ? "pointer" : "not-allowed"
+          }}>
+            <Plus size={16} /> Add
+          </button>
+        </div>
+        {quickEntryPreview && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 12.5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: catColor(quickEntryPreview.category) }} />
+            <span style={{ color: COLORS.muted }}>
+              Will log as <strong style={{ color: COLORS.text }}>{quickEntryPreview.type === "income" ? "income" : "expense"}</strong> ·{" "}
+              <strong style={{ color: COLORS.text }}>{fmt(quickEntryPreview.amount)}</strong> ·{" "}
+              <strong style={{ color: COLORS.text }}>{quickEntryPreview.category}</strong>
+              {quickEntryPreview.note && quickEntryPreview.note !== quickEntryPreview.category ? ` · "${quickEntryPreview.note}"` : ""}
+            </span>
+          </div>
+        )}
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
       <SectionCard title="Quick Add" icon={<Zap size={13} />} right={
         <button onClick={() => setEditingQuickAdds((v) => !v)} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
           {editingQuickAdds ? "Done" : "Edit"}
@@ -1528,9 +1982,10 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
           <div>
             <FieldLabel>Amount (RM){shared ? " — your share, auto-calculated" : ""}</FieldLabel>
-            <input type="number" min="0" step="0.01" placeholder="0.00" value={shared ? (yourShare !== null ? yourShare.toFixed(2) : "") : form.amount}
+            <input type="text" inputMode="decimal" placeholder="0.00" value={shared ? (yourShare !== null ? yourShare.toFixed(2) : "") : form.amount}
               disabled={shared}
-              onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))}
+              onChange={(e) => setForm((f) => ({ ...f, amount: formatCentsInput(e.target.value) }))}
+              onFocus={(e) => e.target.select()}
               style={{ width: "100%", boxSizing: "border-box", opacity: shared ? 0.6 : 1 }} className="mono" />
           </div>
           <div>
@@ -1556,15 +2011,11 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
               <>
                 <div>
                   <FieldLabel>From Account</FieldLabel>
-                  <select value={transferFrom} onChange={(e) => setTransferFrom(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
-                    {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
+                  <AccountSelect value={transferFrom} onChange={setTransferFrom} accounts={accounts} />
                 </div>
                 <div>
                   <FieldLabel>To Account</FieldLabel>
-                  <select value={transferTo} onChange={(e) => setTransferTo(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
-                    {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
+                  <AccountSelect value={transferTo} onChange={setTransferTo} accounts={accounts} />
                 </div>
               </>
             ) : (
@@ -1575,10 +2026,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
           ) : accounts.length > 0 && (
             <div style={{ gridColumn: "1 / -1" }}>
               <FieldLabel>Account</FieldLabel>
-              <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }}>
-                <option value="">Unassigned</option>
-                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
+              <AccountSelect value={form.accountId} onChange={(id) => setForm((f) => ({ ...f, accountId: id }))} accounts={accounts} allowUnassigned />
             </div>
           )}
         </div>
@@ -1681,10 +2129,7 @@ function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, acco
             {accounts.length > 0 && (
               <div>
                 <FieldLabel>Account</FieldLabel>
-                <select value={q.accountId || ""} onChange={(e) => onUpdate(q.id, { accountId: e.target.value || null })} style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5 }}>
-                  <option value="">Unassigned</option>
-                  {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
+                <AccountSelect value={q.accountId || ""} onChange={(id) => onUpdate(q.id, { accountId: id || null })} accounts={accounts} allowUnassigned compact />
               </div>
             )}
           </div>
@@ -1701,8 +2146,165 @@ function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, acco
 
 /* ---------- ledger ---------- */
 
-function Ledger({ entries, onRemove, onUpdate, onToggleBudget, preset, categories, accounts, onAddCategory }) {
+function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [parseError, setParseError] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const handleFile = (file) => {
+    if (!file) return;
+    setFileName(file.name);
+    setParseError("");
+    setRows([]);
+    setDateFrom("");
+    setDateTo("");
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    if (isPdf) {
+      setParsing(true);
+      extractPdfText(file)
+        .then((lines) => setRows(parseStatementLines(lines, categories, quickAdds)))
+        .catch(() => setParseError("Couldn't read this PDF — it may be a scanned or image-based statement, which we can't extract text from yet."))
+        .finally(() => setParsing(false));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = String(e.target.result || "");
+      setRows(parseCsvToEntries(parseCSV(text), categories, quickAdds));
+    };
+    reader.readAsText(file);
+  };
+
+  const toggleRow = (i) => setRows((rs) => rs.map((r, idx) => idx === i ? { ...r, include: !r.include } : r));
+  const updateRow = (i, patch) => setRows((rs) => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+  const flipType = (i, r) => {
+    const newType = r.type === "income" ? "expense" : "income";
+    const catList = newType === "income" ? categories.income : categories.expense;
+    updateRow(i, { type: newType, category: catList.includes(r.category) ? r.category : (catList[0] || "Other") });
+  };
+
+  const inRange = (date) => (!dateFrom || date >= dateFrom) && (!dateTo || date <= dateTo);
+  const visibleRows = rows.map((r, idx) => ({ ...r, _idx: idx })).filter((r) => inRange(r.date));
+  const includedCount = visibleRows.filter((r) => r.include).length;
+  const catsFor = (type) => type === "income" ? categories.income : categories.expense;
+  const hasRange = !!(dateFrom || dateTo);
+
+  const selectAllInRange = (include) => setRows((rs) => rs.map((r) => inRange(r.date) ? { ...r, include } : r));
+
+  const doImport = () => {
+    const toImport = rows.filter((r) => r.include && inRange(r.date)).map((r) => ({
+      type: r.type, amount: r.amount, category: r.category, note: r.note,
+      date: r.date, debts: null, debtsTotal: null, accountId: accountId || null, excludeFromBudget: false,
+    }));
+    if (!toImport.length) return;
+    onImport(toImport);
+    onClose();
+  };
+
+  return (
+    <div className="nav-dropdown" style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 14, padding: 14, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700 }}>Import Transactions</div>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.muted, display: "flex" }}><X size={15} /></button>
+      </div>
+      {parsing ? (
+        <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12.5, color: COLORS.muted }}>Reading {fileName}…</div>
+      ) : !fileName ? (
+        <div>
+          <p style={{ fontSize: 12, color: COLORS.muted, marginTop: 0, marginBottom: 10 }}>
+            Upload a CSV or PDF statement exported from your bank. We'll try to detect the date, amount, and description automatically, and guess a category for each row.
+          </p>
+          <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5 }} />
+        </div>
+      ) : rows.length === 0 ? (
+        <div>
+          <EmptyNote>{parseError || `Couldn't find recognizable transactions in "${fileName}". Try exporting a plain CSV with Date, Description, and Amount columns, or a text-based (not scanned) PDF statement.`}</EmptyNote>
+          <div style={{ marginTop: 10 }}>
+            <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5 }} />
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+            <div style={{ fontSize: 12, color: COLORS.muted }}>
+              {fileName} · {hasRange ? `${visibleRows.length} of ${rows.length} rows in range` : `${rows.length} row${rows.length === 1 ? "" : "s"} found`}, {includedCount} selected
+            </div>
+            <div style={{ minWidth: 160 }}>
+              <AccountSelect value={accountId} onChange={setAccountId} accounts={accounts} allowUnassigned compact />
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div>
+              <FieldLabel>From</FieldLabel>
+              <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text }} />
+            </div>
+            <div>
+              <FieldLabel>To</FieldLabel>
+              <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text }} />
+            </div>
+            {hasRange && (
+              <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "6px 0" }}>
+                Clear range
+              </button>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={() => selectAllInRange(true)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "6px 0" }}>
+              Select all{hasRange ? " in range" : ""}
+            </button>
+            <button onClick={() => selectAllInRange(false)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "6px 0" }}>
+              Select none
+            </button>
+          </div>
+          {visibleRows.length === 0 ? (
+            <EmptyNote>No transactions fall in that date range.</EmptyNote>
+          ) : (
+            <div style={{ maxHeight: 340, overflowY: "auto", border: "1px solid " + COLORS.border, borderRadius: 10 }}>
+              {visibleRows.map((r, pos) => (
+                <div key={r._idx} style={{
+                  display: "grid", gridTemplateColumns: "18px 82px 64px 1fr 108px", gap: 8, alignItems: "center",
+                  padding: "8px 10px", borderBottom: pos < visibleRows.length - 1 ? "1px solid " + COLORS.border : "none",
+                  opacity: r.include ? 1 : 0.45
+                }}>
+                  <input type="checkbox" checked={r.include} onChange={() => toggleRow(r._idx)} />
+                  <div style={{ fontSize: 11, color: COLORS.muted }}>{r.date}</div>
+                  <button onClick={() => flipType(r._idx, r)} style={{
+                    padding: "3px 6px", borderRadius: 999, border: "none", fontSize: 10.5, fontWeight: 700, cursor: "pointer",
+                    background: r.type === "income" ? COLORS.greenLight : COLORS.roseLight,
+                    color: r.type === "income" ? COLORS.green : COLORS.rose
+                  }}>{r.type === "income" ? "+" : "-"}{fmt(r.amount)}</button>
+                  <input value={r.note} onChange={(e) => updateRow(r._idx, { note: e.target.value })}
+                    style={{ padding: "5px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text }} />
+                  <select value={r.category} onChange={(e) => updateRow(r._idx, { category: e.target.value })}
+                    style={{ padding: "5px 6px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 11.5, background: COLORS.card, color: COLORS.text }}>
+                    {catsFor(r.type).map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={() => { setRows([]); setFileName(""); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid " + COLORS.border, background: COLORS.card, color: COLORS.muted, fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Choose different file</button>
+            <button onClick={doImport} disabled={!includedCount} style={{
+              flex: 1, padding: "9px 14px", borderRadius: 10, border: "none",
+              background: includedCount ? COLORS.orange : COLORS.border, color: "#fff", fontWeight: 700, fontSize: 12.5,
+              cursor: includedCount ? "pointer" : "not-allowed"
+            }}>Import {includedCount} Transaction{includedCount === 1 ? "" : "s"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset, categories, accounts, quickAdds, onAddCategory }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [periodType, setPeriodType] = useState("all");
   const [anchor, setAnchor] = useState(new Date());
   const [typeFilter, setTypeFilter] = useState("all");
@@ -1771,21 +2373,39 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, preset, categorie
 
   return (
     <SectionCard title="Transaction Ledger" right={
-      <button onClick={() => setFiltersOpen((v) => !v)} style={{
-        display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 999,
-        border: "1px solid " + (activeFilterCount > 0 ? COLORS.orange : COLORS.border),
-        background: activeFilterCount > 0 ? COLORS.orangeLight : COLORS.card,
-        color: activeFilterCount > 0 ? COLORS.orangeDark : COLORS.muted, fontSize: 12.5, fontWeight: 700, cursor: "pointer"
-      }}>
-        <SlidersHorizontal size={13} /> Filters
-        {activeFilterCount > 0 && (
-          <span style={{ background: COLORS.orange, color: "#fff", borderRadius: 999, minWidth: 16, height: 16, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>
-            {activeFilterCount}
-          </span>
-        )}
-        <ChevronDown size={13} style={{ transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-      </button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => { setImportOpen((v) => !v); setFiltersOpen(false); }} style={{
+          display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 999,
+          border: "1px solid " + COLORS.border, background: COLORS.card, color: COLORS.muted,
+          fontSize: 12.5, fontWeight: 700, cursor: "pointer"
+        }}>
+          <Upload size={13} /> Import
+        </button>
+        <button onClick={() => { setFiltersOpen((v) => !v); setImportOpen(false); }} style={{
+          display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 999,
+          border: "1px solid " + (activeFilterCount > 0 ? COLORS.orange : COLORS.border),
+          background: activeFilterCount > 0 ? COLORS.orangeLight : COLORS.card,
+          color: activeFilterCount > 0 ? COLORS.orangeDark : COLORS.muted, fontSize: 12.5, fontWeight: 700, cursor: "pointer"
+        }}>
+          <SlidersHorizontal size={13} /> Filters
+          {activeFilterCount > 0 && (
+            <span style={{ background: COLORS.orange, color: "#fff", borderRadius: 999, minWidth: 16, height: 16, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>
+              {activeFilterCount}
+            </span>
+          )}
+          <ChevronDown size={13} style={{ transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+        </button>
+      </div>
     }>
+      {importOpen && (
+        <CsvImporter
+          categories={categories}
+          accounts={accounts}
+          quickAdds={quickAdds}
+          onImport={onBulkAdd}
+          onClose={() => setImportOpen(false)}
+        />
+      )}
       {filtersOpen && (
         <div className="nav-dropdown" style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 14, padding: 14, marginBottom: 14 }}>
           <FieldLabel>Period</FieldLabel>
@@ -2236,20 +2856,32 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
   const [cat, setCat] = useState(categories.expense[0]);
   const [period, setPeriod] = useState("monthly");
   const [limit, setLimit] = useState("");
+  const [expanded, setExpanded] = useState({});
+  const toggleExpanded = (key) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
 
-  const spentForCategoryPeriod = (category, periodType) => {
-    const r = periodRange(periodType, new Date());
-    return entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+  // Returns the exact date range plus the matching, sorted transactions for
+  // a category's budget period — powers both the spent total and the
+  // expandable "Show transactions" breakdown.
+  const categoryPeriodInfo = (category, periodType) => {
+    const range = periodRange(periodType, new Date());
+    const transactions = entries
+      .filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= range.start && e.date <= range.end)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
+    return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
   };
 
-  const masterSpent = useMemo(() => {
+  const masterPeriodInfo = useMemo(() => {
     const now = new Date();
-    const sumIn = (pt) => {
-      const r = periodRange(pt, now);
-      return entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+    const build = (pt) => {
+      const range = periodRange(pt, now);
+      const transactions = entries
+        .filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= range.start && e.date <= range.end)
+        .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
+      return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
     };
-    return { daily: sumIn("daily"), weekly: sumIn("weekly"), monthly: sumIn("monthly") };
+    return { daily: build("daily"), weekly: build("weekly"), monthly: build("monthly") };
   }, [entries]);
+  const masterSpent = { daily: masterPeriodInfo.daily.spent, weekly: masterPeriodInfo.weekly.spent, monthly: masterPeriodInfo.monthly.spent };
 
   const submitBudget = () => {
     const val = parseFloat(limit);
@@ -2274,6 +2906,8 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
             spent={masterSpent[pt]}
             onSet={(val) => onSetMasterBudget(pt, val)}
             onRemove={() => onRemoveMasterBudget(pt)}
+            rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
+            transactions={masterPeriodInfo[pt].transactions}
           />
         ))}
       </SectionCard>
@@ -2317,23 +2951,42 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
             </div>
             {["daily", "weekly", "monthly"].filter((pt) => periods[pt] != null).map((pt) => {
               const lim = periods[pt];
-              const spent = spentForCategoryPeriod(category, pt);
+              const { range, transactions, spent } = categoryPeriodInfo(category, pt);
               const pct = Math.min(100, (spent / lim) * 100);
               const over = spent > lim;
               const color = over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green;
+              const key = `${category}::${pt}`;
+              const isOpen = !!expanded[key];
               return (
                 <div key={pt} style={{ marginBottom: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
                     <span style={{ color: COLORS.muted, fontWeight: 600 }}>{PERIOD_LABEL[pt]}</span>
                     <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
                       <span className="mono" style={{ color: over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(lim)}</span>
                       <button onClick={() => onRemoveBudget(category, pt)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
                     </span>
                   </div>
+                  <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginBottom: 4 }}>{formatDateRange(range.start, range.end)}</div>
                   <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
                   </div>
                   {over && <div style={{ fontSize: 10.5, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - lim)}</div>}
+                  <button onClick={() => toggleExpanded(key)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
+                    {isOpen ? "Hide" : "Show"} transactions ({transactions.length})
+                    <ChevronDown size={11} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                  </button>
+                  {isOpen && (
+                    <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: transactions.length ? "4px 10px" : "8px 10px" }}>
+                      {transactions.length === 0 ? (
+                        <div style={{ fontSize: 11, color: COLORS.mutedLight, padding: "4px 0" }}>No transactions in this period yet.</div>
+                      ) : transactions.map((e, i) => (
+                        <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < transactions.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                          <span style={{ color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)}{e.note ? " · " + e.note : ""}</span>
+                          <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2344,9 +2997,10 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
   );
 }
 
-function MasterBudgetRow({ label, limit, spent, onSet, onRemove }) {
+function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, transactions }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(limit || "");
+  const [showTx, setShowTx] = useState(false);
 
   useEffect(() => { setVal(limit || ""); }, [limit]);
 
@@ -2363,7 +3017,7 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove }) {
 
   return (
     <div style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
         <div style={{ fontSize: 13, fontWeight: 700 }}>{label}</div>
         {!editing && limit ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2379,12 +3033,32 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove }) {
           </div>
         )}
       </div>
+      {rangeLabel && <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginBottom: 6 }}>{rangeLabel}</div>}
       {limit ? (
         <>
           <div style={{ height: 7, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
           </div>
           {over && <div style={{ fontSize: 11, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - limit)}</div>}
+          <button onClick={() => setShowTx((v) => !v)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
+            {showTx ? "Hide" : "Show"} transactions ({transactions.length})
+            <ChevronDown size={11} style={{ transform: showTx ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+          </button>
+          {showTx && (
+            <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: transactions.length ? "4px 10px" : "8px 10px" }}>
+              {transactions.length === 0 ? (
+                <div style={{ fontSize: 11, color: COLORS.mutedLight, padding: "4px 0" }}>No transactions in this period yet.</div>
+              ) : transactions.map((e, i) => (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < transactions.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                  <span style={{ color: COLORS.muted, display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(e.category), flexShrink: 0 }} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)} · {e.category}{e.note ? " · " + e.note : ""}</span>
+                  </span>
+                  <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       ) : (
         <div style={{ fontSize: 11.5, color: COLORS.mutedLight }}>No {label.toLowerCase()} ceiling set.</div>
@@ -2448,9 +3122,8 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
           </div>
           <div>
             <FieldLabel>Category</FieldLabel>
-            <select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value, categoryLabel: "" }))} style={{ width: "100%", boxSizing: "border-box" }}>
-              {(form.type === "expense" ? categories.expense : categories.income).map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <CategorySelect value={form.category} onChange={(c) => setForm((f) => ({ ...f, category: c, categoryLabel: "" }))}
+              options={form.type === "expense" ? categories.expense : categories.income} type={form.type} onAddCategory={onAddCategory} />
           </div>
           <div>
             <FieldLabel>{form.frequency === "weekly" ? "Day of Week" : "Day of Month"}</FieldLabel>
@@ -2470,10 +3143,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
         {accounts.length > 0 && (
           <div style={{ marginBottom: 10 }}>
             <FieldLabel>Account</FieldLabel>
-            <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }}>
-              <option value="">Unassigned</option>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            <AccountSelect value={form.accountId} onChange={(id) => setForm((f) => ({ ...f, accountId: id }))} accounts={accounts} allowUnassigned />
           </div>
         )}
         {error && <div style={{ color: COLORS.rose, fontSize: 12.5, marginBottom: 10, fontWeight: 600 }}>{error}</div>}
@@ -2536,9 +3206,8 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
           <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={{ fontSize: 13 }} />
           <input type="number" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} style={{ fontSize: 13 }} className="mono" />
-          <select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value, categoryLabel: "" }))} style={{ fontSize: 13 }}>
-            {(form.type === "expense" ? categories.expense : categories.income).map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
+          <CategorySelect value={form.category} onChange={(c) => setForm((f) => ({ ...f, category: c, categoryLabel: "" }))}
+            options={form.type === "expense" ? categories.expense : categories.income} type={form.type} onAddCategory={onAddCategory} compact />
           <select value={form.frequency} onChange={(e) => setForm((f) => ({ ...f, frequency: e.target.value, day: 1 }))} style={{ fontSize: 13 }}>
             <option value="monthly">Monthly</option>
             <option value="weekly">Weekly</option>
@@ -2556,10 +3225,7 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
             onChange={(e) => setForm((f) => ({ ...f, categoryLabel: e.target.value }))} style={{ width: "100%", boxSizing: "border-box", marginBottom: 8, fontSize: 13 }} />
         )}
         {accounts.length > 0 && (
-          <select value={form.accountId} onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))} style={{ width: "100%", boxSizing: "border-box", marginBottom: 8, fontSize: 13 }}>
-            <option value="">Unassigned</option>
-            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <AccountSelect value={form.accountId} onChange={(id) => setForm((f) => ({ ...f, accountId: id }))} accounts={accounts} allowUnassigned compact />
         )}
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Save</button>
@@ -2660,15 +3326,17 @@ function Sidebar({ open, onClose, NAV, tab, setTab, profileName }) {
 
 /* ---------- settings ---------- */
 
-function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory }) {
+function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory, onSetColor, onResetColor }) {
   const [typeTab, setTypeTab] = useState("expense");
   const [editingName, setEditingName] = useState(null);
   const [editValue, setEditValue] = useState("");
   const [newName, setNewName] = useState("");
+  const [colorEditing, setColorEditing] = useState(null);
 
   const usageCount = (name) => entries.filter((e) => e.type === typeTab && e.category === name).length;
 
-  const startEdit = (name) => { setEditingName(name); setEditValue(name); };
+  const startEdit = (name) => { setColorEditing(null); setEditingName(name); setEditValue(name); };
+  const toggleColorEditing = (name) => { setEditingName(null); setColorEditing((v) => v === name ? null : name); };
   const commitEdit = () => {
     const trimmed = editValue.trim();
     if (trimmed && trimmed !== editingName) onRename(typeTab, editingName, trimmed);
@@ -2691,7 +3359,7 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
 
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[["expense", "Expense"], ["income", "Income"]].map(([id, label]) => (
-          <button key={id} onClick={() => { setTypeTab(id); setEditingName(null); }} style={{
+          <button key={id} onClick={() => { setTypeTab(id); setEditingName(null); setColorEditing(null); }} style={{
             flex: 1, padding: "8px 10px", borderRadius: 10, border: "1px solid " + (typeTab === id ? COLORS.orange : COLORS.border),
             background: typeTab === id ? COLORS.orangeLight : COLORS.card, color: typeTab === id ? COLORS.orangeDark : COLORS.muted,
             fontWeight: 700, fontSize: 12.5, cursor: "pointer"
@@ -2700,7 +3368,7 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
       </div>
 
       {list.map((c, i) => (
-        <div key={c} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 2px", borderBottom: i === list.length - 1 ? "none" : "1px solid " + COLORS.border }}>
+        <div key={c} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "9px 2px", borderBottom: i === list.length - 1 && colorEditing !== c ? "none" : "1px solid " + COLORS.border }}>
           {editingName === c ? (
             <>
               <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
@@ -2715,7 +3383,10 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
             </>
           ) : (
             <>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: catColor(c), minWidth: 8 }} />
+              <button onClick={() => toggleColorEditing(c)} aria-label={`Change color for ${c}`} style={{
+                width: 16, height: 16, borderRadius: 5, background: catColor(c), minWidth: 16, border: "none", padding: 0, cursor: "pointer",
+                boxShadow: colorEditing === c ? `0 0 0 2px ${COLORS.card}, 0 0 0 4px ${catColor(c)}` : "none"
+              }} />
               <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c}</span>
               <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usageCount(c)} used</span>
               <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
@@ -2725,6 +3396,11 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
                 <Trash2 size={13} />
               </button>
             </>
+          )}
+          {colorEditing === c && (
+            <div style={{ flexBasis: "100%", width: "100%", padding: "10px 10px 12px", marginTop: 2, borderRadius: 12, background: COLORS.bg }}>
+              <CategoryColorPicker value={catColor(c)} onChange={(hex) => onSetColor(c, hex)} onReset={() => onResetColor(c)} />
+            </div>
           )}
         </div>
       ))}
@@ -2737,6 +3413,46 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
         </button>
       </div>
     </SectionCard>
+  );
+}
+
+// Compact color picker used inline under a category row in Settings: a
+// curated preset palette, a custom color wheel for anything else, a hex
+// text field, and a reset link back to the category's default color.
+function CategoryColorPicker({ value, onChange, onReset }) {
+  const [customColor, setCustomColor] = useState(value);
+  useEffect(() => { setCustomColor(value); }, [value]);
+
+  const apply = (hex) => { setCustomColor(hex); onChange(hex); };
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        {CATEGORY_COLOR_PRESETS.map((hex) => (
+          <button key={hex} onClick={() => apply(hex)} aria-label={hex} style={{
+            width: 24, height: 24, borderRadius: "50%", background: hex, border: value.toLowerCase() === hex.toLowerCase() ? `2px solid ${COLORS.text}` : "2px solid transparent",
+            cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0
+          }}>
+            {value.toLowerCase() === hex.toLowerCase() && <Check size={11} color="#fff" />}
+          </button>
+        ))}
+        <label style={{
+          width: 24, height: 24, borderRadius: "50%", cursor: "pointer", position: "relative", overflow: "hidden",
+          border: "2px solid " + COLORS.border, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          background: `conic-gradient(from 0deg, red, yellow, lime, cyan, blue, magenta, red)`
+        }}>
+          <input type="color" value={customColor} onChange={(e) => apply(e.target.value)}
+            style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", border: "none", padding: 0 }} />
+        </label>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <input type="text" value={customColor} onChange={(e) => setCustomColor(e.target.value)}
+          onBlur={() => /^#[0-9A-Fa-f]{6}$/.test(customColor) && apply(customColor)}
+          onKeyDown={(e) => e.key === "Enter" && /^#[0-9A-Fa-f]{6}$/.test(customColor) && apply(customColor)}
+          placeholder="#10B981" style={{ width: 100, fontSize: 12, padding: "6px 8px" }} className="mono" />
+        {onReset && <button onClick={onReset} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Reset to default</button>}
+      </div>
+    </div>
   );
 }
 
@@ -2777,7 +3493,7 @@ function AccentColorPicker({ value, onChange }) {
   );
 }
 
-function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onResetAll }) {
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, onResetAll }) {
   const [name, setName] = useState(profile.name);
 
   useEffect(() => { setName(profile.name); }, [profile.name]);
@@ -2866,7 +3582,7 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
 
       <div style={{ height: 16 }} />
 
-      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} />
+      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} />
 
       <div style={{ height: 16 }} />
 
@@ -2976,21 +3692,14 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ fontSize: 13 }} />
         {isTransfer ? (
           <>
-            <select value={fromAccountId} onChange={(e) => setFromAccountId(e.target.value)} style={{ fontSize: 13 }}>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-            <select value={toAccountId} onChange={(e) => setToAccountId(e.target.value)} style={{ fontSize: 13 }}>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            <AccountSelect value={fromAccountId} onChange={setFromAccountId} accounts={accounts} compact />
+            <AccountSelect value={toAccountId} onChange={setToAccountId} accounts={accounts} compact />
           </>
         ) : (
           <>
             <CategorySelect value={category} onChange={setCategory}
               options={entry.type === "expense" ? categories.expense : categories.income} type={entry.type} onAddCategory={onAddCategory} />
-            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} style={{ fontSize: 13 }}>
-              <option value="">Unassigned</option>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            <AccountSelect value={accountId} onChange={setAccountId} accounts={accounts} allowUnassigned compact />
           </>
         )}
         <input type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ fontSize: 13, gridColumn: "1 / -1" }} />
@@ -3160,9 +3869,119 @@ function SectionCard({ title, icon, right, children }) {
   );
 }
 
-function CategorySelect({ value, onChange, options, type, onAddCategory }) {
+// Category picker used throughout the app: the trigger looks like a
+// color-coded pill for the current selection, and the dropdown offers every
+// option as its own colored pill instead of a plain text list. Pass
+// `compact` for tight spaces (e.g. a table row); omit `onAddCategory` to
+// hide the "add new category" affordance (e.g. read-only pickers).
+// Generic icon-pill dropdown: the trigger shows the selected item's icon (in
+// a tinted circle matching its color) and label, and the open panel lists
+// every item the same way. Backs both AccountSelect (below) and the account
+// "Type" picker. `items` is [{ id, label, Icon, color }].
+function IconPillSelect({ value, onChange, items, compact }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const pick = (id) => { onChange(id); setOpen(false); };
+  const current = items.find((it) => it.id === value) || items[0];
+  const badgeSize = compact ? 18 : 22;
+  const iconSize = compact ? 10 : 12;
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={{
+        width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: compact ? 6 : 8, padding: compact ? "4px 8px 4px 4px" : "6px 11px 6px 6px", borderRadius: compact ? 8 : 10,
+        border: "1px solid " + COLORS.border, background: COLORS.card, cursor: "pointer"
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: compact ? 6 : 8, minWidth: 0 }}>
+          {current && (
+            <span style={{
+              width: badgeSize, height: badgeSize, borderRadius: "50%", background: withAlpha(current.color, "22"),
+              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0
+            }}>
+              <current.Icon size={iconSize} color={current.color} />
+            </span>
+          )}
+          <span style={{ fontSize: compact ? 11.5 : 14, color: COLORS.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {current ? current.label : "Select…"}
+          </span>
+        </span>
+        <ChevronDown size={compact ? 12 : 14} style={{ color: COLORS.muted, flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open && (
+        <div className="nav-dropdown" style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 30,
+          background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 12, padding: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.16)", maxHeight: 260, overflowY: "auto"
+        }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {items.map((item) => {
+              const active = item.id === value;
+              return (
+                <button key={item.id} type="button" onClick={() => pick(item.id)} style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "4px 11px 4px 4px", borderRadius: 999,
+                  border: "1px solid " + (active ? item.color : COLORS.border),
+                  background: active ? withAlpha(item.color, "22") : COLORS.bg,
+                  color: active ? item.color : COLORS.text, fontSize: 12.5, fontWeight: 600, cursor: "pointer"
+                }}>
+                  <span style={{
+                    width: 20, height: 20, borderRadius: "50%", background: withAlpha(item.color, active ? "33" : "22"),
+                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0
+                  }}>
+                    <item.Icon size={11} color={item.color} />
+                  </span>
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Account picker used throughout the app: shows each account as a pill with
+// its account-type icon and color. Pass `allowUnassigned` to include a
+// blank "Unassigned" option (value ""); pass `compact` for tight spaces.
+function AccountSelect({ value, onChange, accounts, allowUnassigned, compact }) {
+  const items = accounts.map((a) => {
+    const t = ACCOUNT_TYPES.find((t) => t.id === a.type) || ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+    return { id: a.id, label: a.name, Icon: t.icon, color: t.color };
+  });
+  const withUnassigned = allowUnassigned ? [{ id: "", label: "Unassigned", Icon: X, color: COLORS.mutedLight }, ...items] : items;
+  return <IconPillSelect value={value} onChange={onChange} items={withUnassigned} compact={compact} />;
+}
+
+// Account "Type" picker (Bank, E-Wallet, Cash, …) — same pill style, backed
+// by the fixed ACCOUNT_TYPES list rather than the user's own accounts.
+function AccountTypeSelect({ value, onChange, compact }) {
+  const items = ACCOUNT_TYPES.map((t) => ({ id: t.id, label: t.label, Icon: t.icon, color: t.color }));
+  return <IconPillSelect value={value} onChange={onChange} items={items} compact={compact} />;
+}
+
+function CategorySelect({ value, onChange, options, type, onAddCategory, compact }) {
+  const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAdding(false); }
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
 
   const commit = () => {
     const name = newName.trim();
@@ -3171,25 +3990,69 @@ function CategorySelect({ value, onChange, options, type, onAddCategory }) {
     onChange(name);
     setNewName("");
     setAdding(false);
+    setOpen(false);
   };
 
-  if (adding) {
-    return (
-      <div style={{ display: "flex", gap: 6 }}>
-        <input autoFocus placeholder="New category name" value={newName} onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setAdding(false); }}
-          style={{ flex: 1, minWidth: 0 }} />
-        <button onClick={commit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "0 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Add</button>
-        <button onClick={() => setAdding(false)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "0 10px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>
-      </div>
-    );
-  }
+  const pick = (c) => { onChange(c); setOpen(false); };
+  const color = catColor(value);
 
   return (
-    <select value={value} onChange={(e) => { if (e.target.value === "__new__") setAdding(true); else onChange(e.target.value); }} style={{ width: "100%", boxSizing: "border-box" }}>
-      {options.map((c) => <option key={c} value={c}>{c}</option>)}
-      <option value="__new__">+ Add new category…</option>
-    </select>
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={{
+        width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: compact ? 6 : 8, padding: compact ? "5px 8px" : "9px 11px", borderRadius: compact ? 8 : 10,
+        border: "1px solid " + COLORS.border, background: COLORS.card, cursor: "pointer"
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: compact ? 6 : 8, minWidth: 0 }}>
+          <span style={{ width: compact ? 7 : 9, height: compact ? 7 : 9, borderRadius: 3, background: color, flexShrink: 0 }} />
+          <span style={{ fontSize: compact ? 11.5 : 14, color: COLORS.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</span>
+        </span>
+        <ChevronDown size={compact ? 12 : 14} style={{ color: COLORS.muted, flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open && (
+        <div className="nav-dropdown" style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 30,
+          background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 12, padding: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.16)", maxHeight: 260, overflowY: "auto"
+        }}>
+          {adding ? (
+            <div style={{ display: "flex", gap: 6, padding: 2 }}>
+              <input autoFocus placeholder="New category name" value={newName} onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setAdding(false); }}
+                style={{ flex: 1, minWidth: 0, fontSize: 12.5 }} />
+              <button onClick={commit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "0 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Add</button>
+              <button onClick={() => setAdding(false)} style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "0 10px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {options.map((c) => {
+                  const active = c === value;
+                  const optColor = catColor(c);
+                  return (
+                    <button key={c} type="button" onClick={() => pick(c)} style={{
+                      display: "flex", alignItems: "center", gap: 6, padding: "6px 11px", borderRadius: 999,
+                      border: "1px solid " + (active ? optColor : COLORS.border),
+                      background: active ? withAlpha(optColor, "22") : COLORS.bg,
+                      color: active ? optColor : COLORS.text, fontSize: 12.5, fontWeight: 600, cursor: "pointer"
+                    }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 2, background: optColor, flexShrink: 0 }} />
+                      {c}
+                    </button>
+                  );
+                })}
+              </div>
+              {onAddCategory && (
+                <button type="button" onClick={() => setAdding(true)} style={{
+                  marginTop: 8, width: "100%", background: "none", border: "1px dashed " + COLORS.border, borderRadius: 999,
+                  padding: "6px 11px", fontSize: 12, fontWeight: 700, color: COLORS.muted, cursor: "pointer"
+                }}>+ Add new category</button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
