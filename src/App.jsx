@@ -544,19 +544,35 @@ function catColor(name) {
 
 function emptyData() {
   return {
-    entries: [], budgets: {}, recurring: [], masterBudgets: {}, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
+    entries: [], budgets: { expense: {}, income: {} }, recurring: [], masterBudgets: { expense: {}, income: {} }, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
     categories: { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
     categoryColors: {},
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
 }
-function normalizeBudgets(raw) {
+// Budgets (and master budgets) can apply to expense categories (a spending
+// ceiling) or income categories (an earning goal). Older saved data stored a
+// single flat map, assumed to be expense budgets, before income budgets
+// existed — detect and upgrade that shape on load.
+function normalizeBudgetGroup(raw) {
   const out = {};
   Object.entries(raw || {}).forEach(([cat, val]) => {
     out[cat] = typeof val === "number" ? { monthly: val } : val;
   });
   return out;
+}
+function normalizeBudgets(raw) {
+  if (raw && (raw.expense || raw.income)) {
+    return { expense: normalizeBudgetGroup(raw.expense), income: normalizeBudgetGroup(raw.income) };
+  }
+  return { expense: normalizeBudgetGroup(raw), income: {} };
+}
+function normalizeMasterBudgets(raw) {
+  if (raw && (raw.expense || raw.income)) {
+    return { expense: { ...(raw.expense || {}) }, income: { ...(raw.income || {}) } };
+  }
+  return { expense: { ...(raw || {}) }, income: {} };
 }
 
 /* ---------- root component ---------- */
@@ -608,7 +624,7 @@ export default function FinanceTracker() {
             entries: parsed.entries || [],
             budgets: normalizeBudgets(parsed.budgets),
             recurring: parsed.recurring || [],
-            masterBudgets: parsed.masterBudgets || {},
+            masterBudgets: normalizeMasterBudgets(parsed.masterBudgets),
             accounts: parsed.accounts || [],
             quickAdds: parsed.quickAdds || QUICK_ADD_DEFAULTS,
             categories: parsed.categories || { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
@@ -723,34 +739,35 @@ export default function FinanceTracker() {
     setDebtSettled(entryId, debtId, true);
   };
 
-  const setBudget = (category, periodType, limit) => {
+  const setBudget = (type, category, periodType, limit) => {
     setData((prev) => {
-      const catBudget = { ...(prev.budgets[category] || {}), [periodType]: limit };
-      return { ...prev, budgets: { ...prev.budgets, [category]: catBudget } };
+      const group = { ...(prev.budgets[type] || {}) };
+      group[category] = { ...(group[category] || {}), [periodType]: limit };
+      return { ...prev, budgets: { ...prev.budgets, [type]: group } };
     });
-    pushToast(`${PERIOD_LABEL[periodType]} budget set for ${category} — ${fmt(limit)}`, "success", Target);
+    pushToast(`${PERIOD_LABEL[periodType]} ${type === "income" ? "goal" : "budget"} set for ${category} — ${fmt(limit)}`, "success", Target);
   };
-  const removeBudget = (category, periodType) => {
+  const removeBudget = (type, category, periodType) => {
     setData((prev) => {
-      const catBudget = { ...(prev.budgets[category] || {}) };
+      const group = { ...(prev.budgets[type] || {}) };
+      const catBudget = { ...(group[category] || {}) };
       delete catBudget[periodType];
-      const budgets = { ...prev.budgets };
-      if (Object.keys(catBudget).length === 0) delete budgets[category]; else budgets[category] = catBudget;
-      return { ...prev, budgets };
+      if (Object.keys(catBudget).length === 0) delete group[category]; else group[category] = catBudget;
+      return { ...prev, budgets: { ...prev.budgets, [type]: group } };
     });
-    pushToast(`Budget removed for ${category}`, "danger", Trash2);
+    pushToast(`${type === "income" ? "Goal" : "Budget"} removed for ${category}`, "danger", Trash2);
   };
-  const setMasterBudget = (periodType, limit) => {
-    setData((prev) => ({ ...prev, masterBudgets: { ...prev.masterBudgets, [periodType]: limit } }));
-    pushToast(`${PERIOD_LABEL[periodType]} master budget set — ${fmt(limit)}`, "success", Target);
+  const setMasterBudget = (type, periodType, limit) => {
+    setData((prev) => ({ ...prev, masterBudgets: { ...prev.masterBudgets, [type]: { ...(prev.masterBudgets[type] || {}), [periodType]: limit } } }));
+    pushToast(`${PERIOD_LABEL[periodType]} master ${type === "income" ? "goal" : "budget"} set — ${fmt(limit)}`, "success", Target);
   };
-  const removeMasterBudget = (periodType) => {
+  const removeMasterBudget = (type, periodType) => {
     setData((prev) => {
-      const m = { ...prev.masterBudgets };
+      const m = { ...(prev.masterBudgets[type] || {}) };
       delete m[periodType];
-      return { ...prev, masterBudgets: m };
+      return { ...prev, masterBudgets: { ...prev.masterBudgets, [type]: m } };
     });
-    pushToast(`${PERIOD_LABEL[periodType]} master budget removed`, "danger", Trash2);
+    pushToast(`${PERIOD_LABEL[periodType]} master ${type === "income" ? "goal" : "budget"} removed`, "danger", Trash2);
   };
 
   const addRecurring = (item) => {
@@ -790,7 +807,7 @@ export default function FinanceTracker() {
     pushToast(`${r.name} logged early — ${fmt(r.amount)}`, "success", Zap);
   };
 
-  const goLedgerFiltered = (period, category) => { setLedgerPreset({ period: period || null, category: category || null, token: Date.now() }); setTab("ledger"); };
+  const goLedgerFiltered = (period, category, type) => { setLedgerPreset({ period: period || null, category: category || null, type: type || null, token: Date.now() }); setTab("ledger"); };
 
   const toggleEntryBudget = (id) => {
     const entry = data.entries.find((e) => e.id === id);
@@ -846,11 +863,12 @@ export default function FinanceTracker() {
       const recurring = prev.recurring.map((r) => r.type === type && r.category === oldName ? { ...r, category: trimmed } : r);
       const quickAdds = type === "expense" ? prev.quickAdds.map((q) => q.category === oldName ? { ...q, category: trimmed } : q) : prev.quickAdds;
       let budgets = prev.budgets;
-      if (type === "expense" && prev.budgets[oldName]) {
-        budgets = { ...prev.budgets };
-        const val = budgets[oldName];
-        delete budgets[oldName];
-        budgets[trimmed] = { ...(budgets[trimmed] || {}), ...val };
+      if (prev.budgets[type] && prev.budgets[type][oldName]) {
+        const group = { ...prev.budgets[type] };
+        const val = group[oldName];
+        delete group[oldName];
+        group[trimmed] = { ...(group[trimmed] || {}), ...val };
+        budgets = { ...prev.budgets, [type]: group };
       }
       let categoryColors = prev.categoryColors;
       if (categoryColors && categoryColors[oldName] != null) {
@@ -1150,7 +1168,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
   }, [entries]);
 
   const budgetUsage = useMemo(() => {
-    const withMonthly = Object.entries(budgets).filter(([, p]) => p.monthly != null);
+    const withMonthly = Object.entries(budgets.expense || {}).filter(([, p]) => p.monthly != null);
     if (!withMonthly.length) return null;
     const totalLimit = withMonthly.reduce((s, [, p]) => s + p.monthly, 0);
     const cats = withMonthly.map(([c]) => c);
@@ -1176,24 +1194,26 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
     const items = [];
     const now = new Date();
     const ledgerPeriodFor = { daily: "day", weekly: "week", monthly: "month" };
-    Object.entries(budgets).forEach(([category, periods]) => {
-      Object.entries(periods).forEach(([pt, lim]) => {
+    ["expense", "income"].forEach((type) => {
+      Object.entries(budgets[type] || {}).forEach(([category, periods]) => {
+        Object.entries(periods).forEach(([pt, lim]) => {
+          const r = periodRange(pt, now);
+          const spent = entries.filter((e) => e.type === type && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+          const pct = lim > 0 ? (spent / lim) * 100 : 0;
+          items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
+        });
+      });
+      ["daily", "weekly", "monthly"].forEach((pt) => {
+        const lim = (masterBudgets[type] || {})[pt];
+        if (lim == null) return;
         const r = periodRange(pt, now);
-        const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+        const spent = entries.filter((e) => e.type === type && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
         const pct = lim > 0 ? (spent / lim) * 100 : 0;
-        items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category });
+        items.push({ label: type === "income" ? `Master Income · ${PERIOD_LABEL[pt]}` : `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null, type, isGoal: type === "income" });
       });
     });
-    ["daily", "weekly", "monthly"].forEach((pt) => {
-      const lim = masterBudgets[pt];
-      if (lim == null) return;
-      const r = periodRange(pt, now);
-      const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
-      const pct = lim > 0 ? (spent / lim) * 100 : 0;
-      items.push({ label: `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null });
-    });
-    // Every budget you've set shows up here, sorted by how close it is to its limit —
-    // the ones actually worth watching naturally float to the top.
+    // Every budget (and income goal) you've set shows up here, sorted by how close
+    // it is to its limit — the ones actually worth watching naturally float to the top.
     return items.sort((a, b) => b.pct - a.pct);
   }, [entries, budgets, masterBudgets]);
 
@@ -1261,19 +1281,23 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
         {budgetWatch.length === 0 ? (
           <EmptyNote>No budgets set yet — set one in the Budgets tab.</EmptyNote>
         ) : budgetWatch.map((b, i) => {
-          const barColor = b.pct >= 100 ? COLORS.rose : b.pct >= 70 ? COLORS.amber : COLORS.green;
+          const barColor = b.isGoal
+            ? (b.pct >= 100 ? COLORS.green : b.pct >= 70 ? COLORS.amber : COLORS.blue)
+            : (b.pct >= 100 ? COLORS.rose : b.pct >= 70 ? COLORS.amber : COLORS.green);
           const remaining = b.lim - b.spent;
           return (
-          <div key={i} onClick={() => onGoLedgerFiltered && onGoLedgerFiltered(b.ledgerPeriod, b.category)} style={{ marginBottom: i === budgetWatch.length - 1 ? 0 : 10, cursor: onGoLedgerFiltered ? "pointer" : "default" }}>
+          <div key={i} onClick={() => onGoLedgerFiltered && onGoLedgerFiltered(b.ledgerPeriod, b.category, b.isGoal ? b.type : undefined)} style={{ marginBottom: i === budgetWatch.length - 1 ? 0 : 10, cursor: onGoLedgerFiltered ? "pointer" : "default" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
               <span style={{ fontWeight: 600 }}>{b.label}</span>
-              <span className="mono" style={{ color: b.pct >= 100 ? COLORS.rose : COLORS.muted }}>{fmt(b.spent)} / {fmt(b.lim)}</span>
+              <span className="mono" style={{ color: !b.isGoal && b.pct >= 100 ? COLORS.rose : COLORS.muted }}>{fmt(b.spent)} / {fmt(b.lim)}</span>
             </div>
             <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
               <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: barColor, borderRadius: 4 }} />
             </div>
-            <div className="mono" style={{ fontSize: 10.5, marginTop: 3, fontWeight: 600, color: remaining < 0 ? COLORS.rose : COLORS.mutedLight }}>
-              {remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`}
+            <div className="mono" style={{ fontSize: 10.5, marginTop: 3, fontWeight: 600, color: b.isGoal ? (remaining <= 0 ? COLORS.green : COLORS.mutedLight) : (remaining < 0 ? COLORS.rose : COLORS.mutedLight) }}>
+              {b.isGoal
+                ? (remaining <= 0 ? `Goal reached · +${fmt(-remaining)} over` : `${fmt(remaining)} to go`)
+                : (remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`)}
             </div>
           </div>
           );
@@ -1881,7 +1905,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     if (!amount || amount <= 0) { setError("Enter an amount greater than zero."); return; }
     if (!form.date) { setError("Pick a date."); return; }
     setError("");
-    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null, excludeFromBudget: form.type === "expense" ? excludeFromBudget : false });
+    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null, excludeFromBudget: form.type !== "transfer" ? excludeFromBudget : false });
     setForm((f) => ({ ...f, amount: "", note: "" }));
     setShared(false); setSharedTotal(""); setDebtors([]); setExcludeFromBudget(false);
   };
@@ -2079,11 +2103,11 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
           </div>
         )}
 
-        {form.type === "expense" && (
+        {form.type !== "transfer" && (
           <div style={{ marginBottom: 12 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.muted, cursor: "pointer", fontWeight: 600 }}>
               <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 15, height: 15, padding: 0 }} />
-              <Target size={14} /> Don't count this toward my budgets
+              <Target size={14} /> Don't count this toward my {form.type === "income" ? "goals" : "budgets"}
             </label>
           </div>
         )}
@@ -2319,7 +2343,7 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
     setPeriodType(preset.period || "all");
     setAnchor(new Date());
     setCatFilter(preset.category || "all");
-    setTypeFilter("all");
+    setTypeFilter(preset.type || "all");
     setAcctFilter("all");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preset && preset.token]);
@@ -2853,19 +2877,27 @@ function CompareRow({ label, current, previous, higherIsBetter }) {
 /* ---------- budgets ---------- */
 
 function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets, onSetMasterBudget, onRemoveMasterBudget, categories, onAddCategory }) {
+  const [budgetType, setBudgetType] = useState("expense");
   const [cat, setCat] = useState(categories.expense[0]);
   const [period, setPeriod] = useState("monthly");
   const [limit, setLimit] = useState("");
   const [expanded, setExpanded] = useState({});
   const toggleExpanded = (key) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
 
+  const isIncome = budgetType === "income";
+
+  const switchType = (type) => {
+    setBudgetType(type);
+    setCat((categories[type] || [])[0] || "");
+  };
+
   // Returns the exact date range plus the matching, sorted transactions for
-  // a category's budget period — powers both the spent total and the
+  // a category's budget period — powers both the progress total and the
   // expandable "Show transactions" breakdown.
   const categoryPeriodInfo = (category, periodType) => {
     const range = periodRange(periodType, new Date());
     const transactions = entries
-      .filter((e) => e.type === "expense" && !e.excludeFromBudget && e.category === category && e.date >= range.start && e.date <= range.end)
+      .filter((e) => e.type === budgetType && !e.excludeFromBudget && e.category === category && e.date >= range.start && e.date <= range.end)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
     return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
   };
@@ -2875,37 +2907,52 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
     const build = (pt) => {
       const range = periodRange(pt, now);
       const transactions = entries
-        .filter((e) => e.type === "expense" && !e.excludeFromBudget && e.date >= range.start && e.date <= range.end)
+        .filter((e) => e.type === budgetType && !e.excludeFromBudget && e.date >= range.start && e.date <= range.end)
         .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
       return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
     };
     return { daily: build("daily"), weekly: build("weekly"), monthly: build("monthly") };
-  }, [entries]);
+  }, [entries, budgetType]);
   const masterSpent = { daily: masterPeriodInfo.daily.spent, weekly: masterPeriodInfo.weekly.spent, monthly: masterPeriodInfo.monthly.spent };
 
   const submitBudget = () => {
     const val = parseFloat(limit);
     if (!val || val <= 0) return;
-    onSetBudget(cat, period, val);
+    onSetBudget(budgetType, cat, period, val);
     setLimit("");
   };
 
-  const categoryBudgetEntries = Object.entries(budgets).filter(([, periods]) => Object.keys(periods).length > 0);
+  const groupBudgets = (budgets && budgets[budgetType]) || {};
+  const groupMaster = (masterBudgets && masterBudgets[budgetType]) || {};
+  const categoryBudgetEntries = Object.entries(groupBudgets).filter(([, periods]) => Object.keys(periods).length > 0);
 
   return (
     <div>
-      <SectionCard title="Master Budget" icon={<Target size={13} />}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        {[["expense", "Expense Budgets"], ["income", "Income Goals"]].map(([id, label]) => (
+          <button key={id} onClick={() => switchType(id)} style={{
+            flex: 1, padding: "10px 12px", borderRadius: 12, border: "1px solid " + (budgetType === id ? COLORS.orange : COLORS.border),
+            background: budgetType === id ? COLORS.orangeLight : COLORS.card, color: budgetType === id ? COLORS.orangeDark : COLORS.muted,
+            fontWeight: 700, fontSize: 13, cursor: "pointer"
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <SectionCard title={isIncome ? "Master Income Goal" : "Master Budget"} icon={<Target size={13} />}>
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-          An overall spending ceiling across all categories combined — sits above the per-category budgets below.
+          {isIncome
+            ? "An overall earnings target across all income categories combined — sits above the per-category goals below."
+            : "An overall spending ceiling across all categories combined — sits above the per-category budgets below."}
         </div>
         {["daily", "weekly", "monthly"].map((pt) => (
           <MasterBudgetRow
             key={pt}
             label={PERIOD_LABEL[pt]}
-            limit={masterBudgets[pt]}
+            limit={groupMaster[pt]}
             spent={masterSpent[pt]}
-            onSet={(val) => onSetMasterBudget(pt, val)}
-            onRemove={() => onRemoveMasterBudget(pt)}
+            isGoal={isIncome}
+            onSet={(val) => onSetMasterBudget(budgetType, pt, val)}
+            onRemove={() => onRemoveMasterBudget(budgetType, pt)}
             rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
             transactions={masterPeriodInfo[pt].transactions}
           />
@@ -2914,11 +2961,11 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Set a Category Budget">
+      <SectionCard title={isIncome ? "Set an Income Goal" : "Set a Category Budget"}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
           <div>
             <FieldLabel>Category</FieldLabel>
-            <CategorySelect value={cat} onChange={setCat} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
+            <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} />
           </div>
           <div>
             <FieldLabel>Period</FieldLabel>
@@ -2929,7 +2976,7 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
             </select>
           </div>
           <div>
-            <FieldLabel>Limit (RM)</FieldLabel>
+            <FieldLabel>{isIncome ? "Target (RM)" : "Limit (RM)"}</FieldLabel>
             <input type="number" min="0" step="1" placeholder="0.00" value={limit} onChange={(e) => setLimit(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} className="mono" />
           </div>
           <button onClick={submitBudget} style={{
@@ -2941,8 +2988,8 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Category Budgets">
-        {categoryBudgetEntries.length === 0 && <EmptyNote>No category budgets set yet. Add one above.</EmptyNote>}
+      <SectionCard title={isIncome ? "Income Goals" : "Category Budgets"}>
+        {categoryBudgetEntries.length === 0 && <EmptyNote>{isIncome ? "No income goals set yet. Add one above." : "No category budgets set yet. Add one above."}</EmptyNote>}
         {categoryBudgetEntries.map(([category, periods], idx) => (
           <div key={category} style={{ marginBottom: 16, paddingBottom: 14, borderBottom: idx === categoryBudgetEntries.length - 1 ? "none" : "1px solid " + COLORS.border }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
@@ -2954,23 +3001,29 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
               const { range, transactions, spent } = categoryPeriodInfo(category, pt);
               const pct = Math.min(100, (spent / lim) * 100);
               const over = spent > lim;
-              const color = over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green;
-              const key = `${category}::${pt}`;
+              const color = isIncome
+                ? (spent >= lim ? COLORS.green : pct >= 70 ? COLORS.amber : COLORS.blue)
+                : (over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green);
+              const key = `${budgetType}::${category}::${pt}`;
               const isOpen = !!expanded[key];
               return (
                 <div key={pt} style={{ marginBottom: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
                     <span style={{ color: COLORS.muted, fontWeight: 600 }}>{PERIOD_LABEL[pt]}</span>
                     <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                      <span className="mono" style={{ color: over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(lim)}</span>
-                      <button onClick={() => onRemoveBudget(category, pt)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
+                      <span className="mono" style={{ color: !isIncome && over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(lim)}</span>
+                      <button onClick={() => onRemoveBudget(budgetType, category, pt)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
                     </span>
                   </div>
                   <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginBottom: 4 }}>{formatDateRange(range.start, range.end)}</div>
                   <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
                   </div>
-                  {over && <div style={{ fontSize: 10.5, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - lim)}</div>}
+                  {isIncome
+                    ? (spent >= lim
+                        ? <div style={{ fontSize: 10.5, color: COLORS.green, marginTop: 3, fontWeight: 600 }}>Goal reached · +{fmt(spent - lim)} over</div>
+                        : <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginTop: 3, fontWeight: 600 }}>{fmt(lim - spent)} to go</div>)
+                    : (over && <div style={{ fontSize: 10.5, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - lim)}</div>)}
                   <button onClick={() => toggleExpanded(key)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
                     {isOpen ? "Hide" : "Show"} transactions ({transactions.length})
                     <ChevronDown size={11} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
@@ -2997,7 +3050,7 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
   );
 }
 
-function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, transactions }) {
+function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, transactions, isGoal }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(limit || "");
   const [showTx, setShowTx] = useState(false);
@@ -3013,7 +3066,9 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, tra
 
   const pct = limit ? Math.min(100, (spent / limit) * 100) : 0;
   const over = limit && spent > limit;
-  const color = over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green;
+  const color = isGoal
+    ? (limit && spent >= limit ? COLORS.green : pct >= 70 ? COLORS.amber : COLORS.blue)
+    : (over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green);
 
   return (
     <div style={{ marginBottom: 14 }}>
@@ -3021,13 +3076,13 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, tra
         <div style={{ fontSize: 13, fontWeight: 700 }}>{label}</div>
         {!editing && limit ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="mono" style={{ fontSize: 12, color: over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(limit)}</span>
+            <span className="mono" style={{ fontSize: 12, color: !isGoal && over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(limit)}</span>
             <button onClick={() => setEditing(true)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 11, cursor: "pointer", fontWeight: 700 }}>Edit</button>
             <button onClick={onRemove} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
           </div>
         ) : (
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <input type="number" min="0" step="1" placeholder="RM limit" value={val} onChange={(e) => setVal(e.target.value)}
+            <input type="number" min="0" step="1" placeholder={isGoal ? "RM target" : "RM limit"} value={val} onChange={(e) => setVal(e.target.value)}
               style={{ width: 100, padding: "5px 8px", fontSize: 12.5 }} className="mono" />
             <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Save</button>
           </div>
@@ -3039,7 +3094,11 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, tra
           <div style={{ height: 7, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
           </div>
-          {over && <div style={{ fontSize: 11, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - limit)}</div>}
+          {isGoal
+            ? (spent >= limit
+                ? <div style={{ fontSize: 11, color: COLORS.green, marginTop: 3, fontWeight: 600 }}>Goal reached · +{fmt(spent - limit)} over</div>
+                : <div style={{ fontSize: 11, color: COLORS.mutedLight, marginTop: 3, fontWeight: 600 }}>{fmt(limit - spent)} to go</div>)
+            : (over && <div style={{ fontSize: 11, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - limit)}</div>)}
           <button onClick={() => setShowTx((v) => !v)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
             {showTx ? "Hide" : "Show"} transactions ({transactions.length})
             <ChevronDown size={11} style={{ transform: showTx ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
@@ -3061,7 +3120,7 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, tra
           )}
         </>
       ) : (
-        <div style={{ fontSize: 11.5, color: COLORS.mutedLight }}>No {label.toLowerCase()} ceiling set.</div>
+        <div style={{ fontSize: 11.5, color: COLORS.mutedLight }}>No {label.toLowerCase()} {isGoal ? "goal" : "ceiling"} set.</div>
       )}
     </div>
   );
@@ -3681,7 +3740,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
       if (fromAccountId === toAccountId) { setError("Pick two different accounts."); return; }
       onSave({ amount: amt, date, note: note.trim(), fromAccountId, toAccountId });
     } else {
-      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null, excludeFromBudget: entry.type === "expense" ? excludeFromBudget : false });
+      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null, excludeFromBudget: !isTransfer ? excludeFromBudget : false });
     }
   };
 
@@ -3704,10 +3763,10 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
         )}
         <input type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ fontSize: 13, gridColumn: "1 / -1" }} />
       </div>
-      {entry.type === "expense" && (
+      {!isTransfer && (
         <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: COLORS.muted, cursor: "pointer", fontWeight: 600, marginBottom: 8 }}>
           <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 14, height: 14, padding: 0 }} />
-          Don't count toward my budgets
+          Don't count toward my {entry.type === "income" ? "goals" : "budgets"}
         </label>
       )}
       {entry.debts && entry.debts.length > 0 && (
@@ -3725,7 +3784,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
 }
 
 function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }) {
-  const showBudgetToggle = onToggleBudget && e.type === "expense";
+  const showBudgetToggle = onToggleBudget && e.type !== "transfer";
   const cols = [hideDate ? null : "56px", "1fr", "auto", showBudgetToggle ? "26px" : null, onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
   const badge = debtBadgeText(e);
   const isTransfer = e.type === "transfer";
