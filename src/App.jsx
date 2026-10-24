@@ -1864,9 +1864,10 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   const splitEvenly = () => {
     const total = parseFloat(sharedTotal) || 0;
     if (!debtors.length || total <= 0) return;
-    const each = Math.floor((total / debtors.length) * 100) / 100;
-    const remainder = Math.round((total - each * debtors.length) * 100) / 100;
-    setDebtors((prev) => prev.map((d, i) => ({ ...d, amount: (i === prev.length - 1 ? each + remainder : each).toFixed(2) })));
+    // Split between everyone including you: each person owing gets an equal share,
+    // and any leftover cent from rounding stays in your share (total - what's owed).
+    const each = Math.floor((total / (debtors.length + 1)) * 100) / 100;
+    setDebtors((prev) => prev.map((d) => ({ ...d, amount: each.toFixed(2) })));
   };
 
   const debtorsSum = debtors.reduce((s, d) => s + (parseFloat(d.amount) || 0), 0);
