@@ -91,6 +91,14 @@ const QUICK_ADD_DEFAULTS = [
 ];
 const STORAGE_KEY = "finance-app-data";
 const PERIOD_LABEL = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
+const BUDGET_PERIODS = ["daily", "weekly", "monthly"];
+// Which budget periods a transaction is left out of. Older entries only have the
+// excludeFromBudget flag (no period list), which has always meant "all of them".
+function excludedPeriodsOf(e) {
+  if (!e.excludeFromBudget) return [];
+  return Array.isArray(e.excludedPeriods) && e.excludedPeriods.length ? e.excludedPeriods : BUDGET_PERIODS;
+}
+function isExcludedFrom(e, periodType) { return excludedPeriodsOf(e).includes(periodType); }
 const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const ACCOUNT_TYPES = [
   { id: "bank", label: "Bank", icon: Landmark, color: "#3B82F6" },
@@ -809,10 +817,29 @@ export default function FinanceTracker() {
 
   const goLedgerFiltered = (period, category, type) => { setLedgerPreset({ period: period || null, category: category || null, type: type || null, token: Date.now() }); setTab("ledger"); };
 
+  // Records the gap between the app's balance and the real one as a dated
+  // adjustment entry (rather than rewriting history). Adjustments move the
+  // account balance but are kept out of income/expense reports and budgets.
+  const reconcileAccount = (accountId, diff, note) => {
+    const acc = data.accounts.find((a) => a.id === accountId);
+    if (!acc || !diff) return;
+    setData((prev) => ({
+      ...prev,
+      entries: [...prev.entries, {
+        id: uid(), createdAt: Date.now(), type: diff > 0 ? "income" : "expense", amount: Math.abs(diff),
+        category: "Adjustment", note: (note || "").trim() || "Balance adjustment", date: todayISO(),
+        accountId, adjustment: true, excludeFromBudget: true,
+      }],
+    }));
+    pushToast(`${acc.name} adjusted by ${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff))}`, "success", Wallet);
+  };
+
+  const reportEntries = useMemo(() => data.entries.filter((e) => !e.adjustment), [data.entries]);
+
   const toggleEntryBudget = (id) => {
     const entry = data.entries.find((e) => e.id === id);
     if (!entry) return;
-    setData((prev) => ({ ...prev, entries: prev.entries.map((e) => e.id === id ? { ...e, excludeFromBudget: !e.excludeFromBudget } : e) }));
+    setData((prev) => ({ ...prev, entries: prev.entries.map((e) => e.id === id ? { ...e, excludeFromBudget: !e.excludeFromBudget, excludedPeriods: undefined } : e) }));
     pushToast(entry.excludeFromBudget ? "Back in your budgets" : "Excluded from your budgets", entry.excludeFromBudget ? "success" : "info", Target);
   };
 
@@ -1068,6 +1095,7 @@ export default function FinanceTracker() {
               onRemove={removeAccount}
               onUpdateEntry={updateEntry}
               onRemoveEntry={removeEntry}
+              onReconcile={reconcileAccount}
               categories={data.categories}
               onAddCategory={addCategory}
             />
@@ -1087,8 +1115,8 @@ export default function FinanceTracker() {
             />
           )}
           {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} onBulkAdd={bulkAddEntries} preset={ledgerPreset} categories={data.categories} accounts={data.accounts} quickAdds={data.quickAdds} onAddCategory={addCategory} />}
-          {tab === "periods" && <Periods entries={data.entries} accounts={data.accounts} />}
-          {tab === "insights" && <Insights entries={data.entries} accounts={data.accounts} />}
+          {tab === "periods" && <Periods entries={reportEntries} accounts={data.accounts} />}
+          {tab === "insights" && <Insights entries={reportEntries} accounts={data.accounts} />}
           {tab === "budgets" && (
             <Budgets
               entries={data.entries}
@@ -1148,8 +1176,8 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
     const balance = accountFloor + entries.reduce((s, e) => e.type === "transfer" ? s : s + (e.type === "income" ? e.amount : -e.amount), 0);
     const range = periodRange(statScope === "week" ? "weekly" : "monthly", new Date());
     const scoped = entries.filter((e) => e.date >= range.start && e.date <= range.end);
-    const income = scoped.filter((e) => e.type === "income").reduce((s, e) => s + e.amount, 0);
-    const expense = scoped.filter((e) => e.type === "expense").reduce((s, e) => s + e.amount, 0);
+    const income = scoped.filter((e) => e.type === "income" && !e.adjustment).reduce((s, e) => s + e.amount, 0);
+    const expense = scoped.filter((e) => e.type === "expense" && !e.adjustment).reduce((s, e) => s + e.amount, 0);
     return { balance, income, expense, net: income - expense };
   }, [entries, accounts, statScope]);
 
@@ -1172,7 +1200,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
     if (!withMonthly.length) return null;
     const totalLimit = withMonthly.reduce((s, [, p]) => s + p.monthly, 0);
     const cats = withMonthly.map(([c]) => c);
-    const spent = entries.filter((e) => e.type === "expense" && !e.excludeFromBudget && monthKey(e.date) === cmk && cats.includes(e.category)).reduce((s, e) => s + e.amount, 0);
+    const spent = entries.filter((e) => e.type === "expense" && !isExcludedFrom(e, "monthly") && monthKey(e.date) === cmk && cats.includes(e.category)).reduce((s, e) => s + e.amount, 0);
     return { pct: totalLimit > 0 ? Math.round((spent / totalLimit) * 100) : 0, spent, totalLimit };
   }, [entries, budgets, cmk]);
 
@@ -1198,7 +1226,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
       Object.entries(budgets[type] || {}).forEach(([category, periods]) => {
         Object.entries(periods).forEach(([pt, lim]) => {
           const r = periodRange(pt, now);
-          const spent = entries.filter((e) => e.type === type && !e.excludeFromBudget && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+          const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
           const pct = lim > 0 ? (spent / lim) * 100 : 0;
           items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
         });
@@ -1207,7 +1235,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
         const lim = (masterBudgets[type] || {})[pt];
         if (lim == null) return;
         const r = periodRange(pt, now);
-        const spent = entries.filter((e) => e.type === type && !e.excludeFromBudget && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+        const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
         const pct = lim > 0 ? (spent / lim) * 100 : 0;
         items.push({ label: type === "income" ? `Master Income · ${PERIOD_LABEL[pt]}` : `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null, type, isGoal: type === "income" });
       });
@@ -1416,7 +1444,7 @@ function QuickAction({ icon, color, label, onClick }) {
 
 /* ---------- accounts ---------- */
 
-function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEntry, onRemoveEntry, categories, onAddCategory }) {
+function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEntry, onRemoveEntry, onReconcile, categories, onAddCategory }) {
   const [editingId, setEditingId] = useState(null);
 
   const related = useMemo(() => (
@@ -1481,6 +1509,10 @@ function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEn
 
       <div style={{ height: 16 }} />
 
+      <ReconcilePanel account={account} balance={balance} related={related} onReconcile={onReconcile} />
+
+      <div style={{ height: 16 }} />
+
       <SectionCard title={`Transactions (${related.length})`}>
         {related.length === 0 && <EmptyNote>No transactions for this account yet.</EmptyNote>}
         {groups.map(([date, items], gi) => (
@@ -1500,7 +1532,116 @@ function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEn
   );
 }
 
-function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry, onRemoveEntry, categories, onAddCategory }) {
+function ReconcilePanel({ account, balance, related, onReconcile }) {
+  const [open, setOpen] = useState(false);
+  const [actual, setActual] = useState("");
+  const [note, setNote] = useState("");
+
+  const actualNum = parseFloat(actual);
+  const hasActual = actual !== "" && !isNaN(actualNum);
+  const diff = hasActual ? Math.round((actualNum - balance) * 100) / 100 : 0;
+
+  // Entries that look like the same purchase logged twice (same day, amount, note).
+  const dupKeys = useMemo(() => {
+    const seen = {}, dups = new Set();
+    related.forEach((e) => {
+      if (e.type === "transfer" || e.adjustment) return;
+      const k = [e.date, e.type, e.amount, (e.note || "").trim().toLowerCase()].join("|");
+      if (seen[k]) dups.add(k); else seen[k] = true;
+    });
+    return dups;
+  }, [related]);
+  const dupKeyOf = (e) => [e.date, e.type, e.amount, (e.note || "").trim().toLowerCase()].join("|");
+
+  const recent = related.filter((e) => !e.adjustment).slice(0, 8);
+
+  const close = () => { setOpen(false); setActual(""); setNote(""); };
+  const apply = () => {
+    if (!hasActual || diff === 0) return;
+    onReconcile(account.id, diff, note);
+    close();
+  };
+
+  return (
+    <SectionCard title="Reconcile Balance" right={!open && (
+      <button onClick={() => setOpen(true)} style={{ background: COLORS.orangeLight, color: COLORS.orangeDark, border: "none", borderRadius: 999, padding: "6px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+        Balance doesn't match?
+      </button>
+    )}>
+      {!open ? (
+        <div style={{ fontSize: 12, color: COLORS.muted }}>
+          If this doesn't match what your bank or wallet shows, compare them here and fix the gap without losing any history.
+        </div>
+      ) : (
+        <div>
+          <FieldLabel>Actual balance right now (RM)</FieldLabel>
+          <input type="number" step="0.01" placeholder="0.00" value={actual} onChange={(e) => setActual(e.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", marginBottom: 10 }} className="mono" />
+
+          {hasActual && (
+            <div style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                <span style={{ color: COLORS.muted }}>App shows</span><span className="mono" style={{ fontWeight: 700 }}>{fmt(balance)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                <span style={{ color: COLORS.muted }}>Actual</span><span className="mono" style={{ fontWeight: 700 }}>{fmt(actualNum)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 800, color: diff === 0 ? COLORS.green : COLORS.rose }}>
+                <span>Difference</span>
+                <span className="mono">{diff === 0 ? "Matches" : (diff > 0 ? "+" : "−") + fmt(Math.abs(diff))}</span>
+              </div>
+            </div>
+          )}
+
+          {hasActual && diff !== 0 && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Check these first</div>
+              <div style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 8 }}>
+                Most gaps come from a cash or card purchase you forgot to log, the same transaction entered twice (e.g. imported and added by hand), or something logged against the wrong account. Your latest entries here:
+              </div>
+              <div style={{ background: COLORS.bg, borderRadius: 10, padding: recent.length ? "4px 10px" : "8px 10px", marginBottom: 12 }}>
+                {recent.length === 0 ? (
+                  <div style={{ fontSize: 11, color: COLORS.mutedLight }}>No transactions on this account yet.</div>
+                ) : recent.map((e, i) => (
+                  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < recent.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                    <span style={{ color: COLORS.muted, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {relDateLabel(e.date)} · {e.note || e.category}
+                      {e.type !== "transfer" && dupKeys.has(dupKeyOf(e)) && <span style={{ color: COLORS.amber, fontWeight: 700 }}> · possible duplicate</span>}
+                    </span>
+                    <span className="mono" style={{ flexShrink: 0, marginLeft: 8, color: e.type === "income" || (e.type === "transfer" && e.toAccountId === account.id) ? COLORS.green : COLORS.text }}>
+                      {e.type === "income" || (e.type === "transfer" && e.toAccountId === account.id) ? "+" : "−"}{fmt(e.amount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11.5, color: COLORS.mutedLight, marginBottom: 12 }}>
+                Fix or delete entries in the Transactions list below, then reconcile again. If everything is right and the gap is real, adjust it:
+              </div>
+              <input type="text" placeholder="Note (optional), e.g. Missing cash spend" value={note} onChange={(e) => setNote(e.target.value)}
+                style={{ width: "100%", boxSizing: "border-box", marginBottom: 10 }} />
+              <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 10 }}>
+                This logs a dated "Balance adjustment" of {diff > 0 ? "+" : "−"}{fmt(Math.abs(diff))}. It changes this account's balance only — it won't count in your income, expenses, reports or budgets.
+              </div>
+            </>
+          )}
+
+          <div style={{ display: "flex", gap: 6 }}>
+            {hasActual && diff !== 0 && (
+              <button onClick={apply} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                Adjust by {diff > 0 ? "+" : "−"}{fmt(Math.abs(diff))}
+              </button>
+            )}
+            <button onClick={close} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>
+              {hasActual && diff === 0 ? "Done" : "Cancel"}
+            </button>
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry, onRemoveEntry, onReconcile, categories, onAddCategory }) {
   const [form, setForm] = useState({ name: "", type: "bank", customType: "", initialBalance: "" });
   const [error, setError] = useState("");
   const [selectedId, setSelectedId] = useState(null);
@@ -1552,6 +1693,7 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
         onBack={() => setSelectedId(null)}
         onUpdateEntry={onUpdateEntry}
         onRemoveEntry={onRemoveEntry}
+        onReconcile={onReconcile}
         categories={categories}
         onAddCategory={onAddCategory}
       />
@@ -1838,6 +1980,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
   const [transferFrom, setTransferFrom] = useState("");
   const [transferTo, setTransferTo] = useState("");
   const [excludeFromBudget, setExcludeFromBudget] = useState(false);
+  const [excludedPeriods, setExcludedPeriods] = useState(BUDGET_PERIODS);
   const [error, setError] = useState("");
   const [editingQuickAdds, setEditingQuickAdds] = useState(false);
   const [quickEntryText, setQuickEntryText] = useState("");
@@ -1906,9 +2049,9 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
     if (!amount || amount <= 0) { setError("Enter an amount greater than zero."); return; }
     if (!form.date) { setError("Pick a date."); return; }
     setError("");
-    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null, excludeFromBudget: form.type !== "transfer" ? excludeFromBudget : false });
+    onAdd({ type: form.type, amount, category: form.category, note, date: form.date, debts: debtsPayload, debtsTotal, accountId: form.accountId || null, excludeFromBudget: form.type !== "transfer" ? excludeFromBudget : false, excludedPeriods: form.type !== "transfer" && excludeFromBudget && excludedPeriods.length < BUDGET_PERIODS.length ? excludedPeriods : undefined });
     setForm((f) => ({ ...f, amount: "", note: "" }));
-    setShared(false); setSharedTotal(""); setDebtors([]); setExcludeFromBudget(false);
+    setShared(false); setSharedTotal(""); setDebtors([]); setExcludeFromBudget(false); setExcludedPeriods(BUDGET_PERIODS);
   };
 
   const quickAdd = (q) => onAdd({ type: "expense", amount: q.amount, category: q.category, note: q.label, date: form.date || todayISO(), debts: null, debtsTotal: null, accountId: q.accountId || null });
@@ -2106,10 +2249,9 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
 
         {form.type !== "transfer" && (
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.muted, cursor: "pointer", fontWeight: 600 }}>
-              <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 15, height: 15, padding: 0 }} />
-              <Target size={14} /> Don't count this toward my {form.type === "income" ? "goals" : "budgets"}
-            </label>
+            <BudgetExcludePicker checked={excludeFromBudget} periods={excludedPeriods}
+              onChange={(chk, per) => { setExcludeFromBudget(chk); setExcludedPeriods(per); }}
+              label={`Don't count this toward my ${form.type === "income" ? "goals" : "budgets"}`} />
           </div>
         )}
 
@@ -2335,6 +2477,7 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
   const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
   const [acctFilter, setAcctFilter] = useState("all");
+  const [showAdjustments, setShowAdjustments] = useState(true);
   const [editingId, setEditingId] = useState(null);
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 20;
@@ -2349,16 +2492,16 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preset && preset.token]);
 
-  useEffect(() => { setPage(1); }, [periodType, typeFilter, catFilter, acctFilter, anchor]);
+  useEffect(() => { setPage(1); }, [periodType, typeFilter, catFilter, acctFilter, anchor, showAdjustments]);
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
   const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
 
   const allCats = [...new Set([...categories.expense, ...categories.income])];
 
-  const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0) + (acctFilter !== "all" ? 1 : 0);
+  const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0) + (acctFilter !== "all" ? 1 : 0) + (!showAdjustments ? 1 : 0);
 
-  const clearFilters = () => { setPeriodType("all"); setAnchor(new Date()); setTypeFilter("all"); setCatFilter("all"); setAcctFilter("all"); };
+  const clearFilters = () => { setPeriodType("all"); setAnchor(new Date()); setTypeFilter("all"); setCatFilter("all"); setAcctFilter("all"); setShowAdjustments(true); };
 
   const matchesAccount = (e) => {
     if (acctFilter === "all") return true;
@@ -2373,8 +2516,9 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
       .filter((e) => typeFilter === "all" || e.type === typeFilter)
       .filter((e) => catFilter === "all" || e.category === catFilter)
       .filter(matchesAccount)
+      .filter((e) => showAdjustments || !e.adjustment)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
-  ), [entries, periodType, range, typeFilter, catFilter, acctFilter]);
+  ), [entries, periodType, range, typeFilter, catFilter, acctFilter, showAdjustments]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, totalPages);
@@ -2480,6 +2624,13 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
                 <option value="unassigned">Unassigned</option>
               </select>
             </>
+          )}
+
+          {entries.some((e) => e.adjustment) && (
+            <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: COLORS.muted, cursor: "pointer", fontWeight: 600, margin: "12px 0" }}>
+              <input type="checkbox" checked={showAdjustments} onChange={(e) => setShowAdjustments(e.target.checked)} style={{ width: 14, height: 14, padding: 0 }} />
+              Show balance adjustments
+            </label>
           )}
 
           {activeFilterCount > 0 && (
@@ -2898,7 +3049,7 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
   const categoryPeriodInfo = (category, periodType) => {
     const range = periodRange(periodType, new Date());
     const transactions = entries
-      .filter((e) => e.type === budgetType && !e.excludeFromBudget && e.category === category && e.date >= range.start && e.date <= range.end)
+      .filter((e) => e.type === budgetType && !isExcludedFrom(e, periodType) && e.category === category && e.date >= range.start && e.date <= range.end)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
     return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
   };
@@ -2908,7 +3059,7 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
     const build = (pt) => {
       const range = periodRange(pt, now);
       const transactions = entries
-        .filter((e) => e.type === budgetType && !e.excludeFromBudget && e.date >= range.start && e.date <= range.end)
+        .filter((e) => e.type === budgetType && !isExcludedFrom(e, pt) && e.date >= range.start && e.date <= range.end)
         .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
       return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
     };
@@ -3720,6 +3871,38 @@ function debtBadgeText(e) {
   return null;
 }
 
+function BudgetExcludePicker({ checked, periods, onChange, label, small }) {
+  const toggle = (pt) => {
+    const next = periods.includes(pt) ? periods.filter((p) => p !== pt) : [...periods, pt];
+    // Unticking the last period is the same as not excluding at all.
+    if (next.length === 0) onChange(false, BUDGET_PERIODS);
+    else onChange(true, BUDGET_PERIODS.filter((p) => next.includes(p)));
+  };
+  return (
+    <div>
+      <label style={{ display: "flex", alignItems: "center", gap: small ? 7 : 8, fontSize: small ? 12 : 13, color: COLORS.muted, cursor: "pointer", fontWeight: 600 }}>
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked, BUDGET_PERIODS)} style={{ width: small ? 14 : 15, height: small ? 14 : 15, padding: 0 }} />
+        {!small && <Target size={14} />} {label}
+      </label>
+      {checked && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, color: COLORS.mutedLight, fontWeight: 600 }}>Left out of:</span>
+          {BUDGET_PERIODS.map((pt) => {
+            const on = periods.includes(pt);
+            return (
+              <button key={pt} type="button" onClick={() => toggle(pt)} style={{
+                padding: "4px 10px", borderRadius: 999, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                border: "1px solid " + (on ? COLORS.orange : COLORS.border),
+                background: on ? COLORS.orangeLight : COLORS.card, color: on ? COLORS.orangeDark : COLORS.muted
+              }}>{PERIOD_LABEL[pt]}</button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCategory }) {
   const isTransfer = entry.type === "transfer";
   const [amount, setAmount] = useState(entry.amount);
@@ -3730,6 +3913,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
   const [fromAccountId, setFromAccountId] = useState(entry.fromAccountId || "");
   const [toAccountId, setToAccountId] = useState(entry.toAccountId || "");
   const [excludeFromBudget, setExcludeFromBudget] = useState(!!entry.excludeFromBudget);
+  const [excludedPeriods, setExcludedPeriods] = useState(entry.excludeFromBudget ? excludedPeriodsOf(entry) : BUDGET_PERIODS);
   const [error, setError] = useState("");
 
   const save = () => {
@@ -3741,7 +3925,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
       if (fromAccountId === toAccountId) { setError("Pick two different accounts."); return; }
       onSave({ amount: amt, date, note: note.trim(), fromAccountId, toAccountId });
     } else {
-      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null, excludeFromBudget: !isTransfer ? excludeFromBudget : false });
+      onSave({ amount: amt, date, note: note.trim(), category, accountId: accountId || null, excludeFromBudget: !isTransfer ? excludeFromBudget : false, excludedPeriods: !isTransfer && excludeFromBudget && excludedPeriods.length < BUDGET_PERIODS.length ? excludedPeriods : undefined });
     }
   };
 
@@ -3764,11 +3948,12 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
         )}
         <input type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ fontSize: 13, gridColumn: "1 / -1" }} />
       </div>
-      {!isTransfer && (
-        <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: COLORS.muted, cursor: "pointer", fontWeight: 600, marginBottom: 8 }}>
-          <input type="checkbox" checked={excludeFromBudget} onChange={(e) => setExcludeFromBudget(e.target.checked)} style={{ width: 14, height: 14, padding: 0 }} />
-          Don't count toward my {entry.type === "income" ? "goals" : "budgets"}
-        </label>
+      {!isTransfer && !entry.adjustment && (
+        <div style={{ marginBottom: 8 }}>
+          <BudgetExcludePicker small checked={excludeFromBudget} periods={excludedPeriods}
+            onChange={(chk, per) => { setExcludeFromBudget(chk); setExcludedPeriods(per); }}
+            label={`Don't count toward my ${entry.type === "income" ? "goals" : "budgets"}`} />
+        </div>
       )}
       {entry.debts && entry.debts.length > 0 && (
         <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 8 }}>
@@ -3785,7 +3970,7 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
 }
 
 function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }) {
-  const showBudgetToggle = onToggleBudget && e.type !== "transfer";
+  const showBudgetToggle = onToggleBudget && e.type !== "transfer" && !e.adjustment;
   const cols = [hideDate ? null : "56px", "1fr", "auto", showBudgetToggle ? "26px" : null, onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
   const badge = debtBadgeText(e);
   const isTransfer = e.type === "transfer";
@@ -3818,7 +4003,8 @@ function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }
             <span style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
             {badge && <Badge>{badge}</Badge>}
             {e.recurring && <Badge>Recurring</Badge>}
-            {e.excludeFromBudget && <Badge>No budget</Badge>}
+            {e.adjustment && <Badge>Adjustment</Badge>}
+            {e.excludeFromBudget && !e.adjustment && <Badge>{excludedPeriodsOf(e).length === BUDGET_PERIODS.length ? "No budget" : "No " + excludedPeriodsOf(e).join("/") + " budget"}</Badge>}
           </div>
         </div>
       </div>
