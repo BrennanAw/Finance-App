@@ -550,11 +550,72 @@ function catColor(name) {
   return CATEGORY_COLOR_OVERRIDES[name] || CAT_COLORS[name] || hashColor(name);
 }
 
+/* ---------- category groups (parents) ----------
+   Each type (expense/income) can have "parent" categories that bundle related
+   categories together. Transactions still store their own (sub-)category; the
+   parent is derived through map[subCategory] = parentName. Parent names are
+   kept distinct from category names so a budget keyed by a name is never
+   ambiguous: a budget on a parent covers all of its sub-categories. */
+const EMPTY_GROUPS = { expense: { parents: [], map: {} }, income: { parents: [], map: {} } };
+let CATEGORY_GROUPS_LIVE = EMPTY_GROUPS;
+const SUGGESTED_GROUPS = {
+  expense: [
+    { name: "Food & Drink", members: ["Food", "Groceries"] },
+    { name: "Home & Bills", members: ["Rent", "Bills"] },
+    { name: "Lifestyle", members: ["Shopping", "Entertainment"] },
+  ],
+  income: [
+    { name: "Work Income", members: ["Salary", "Freelance"] },
+  ],
+};
+function normalizeCategoryGroups(raw) {
+  const out = { expense: { parents: [], map: {} }, income: { parents: [], map: {} } };
+  ["expense", "income"].forEach((t) => {
+    const g = raw && raw[t];
+    if (!g) return;
+    out[t].parents = Array.isArray(g.parents) ? [...g.parents] : [];
+    out[t].map = g.map && typeof g.map === "object" ? { ...g.map } : {};
+  });
+  return out;
+}
+function parentOf(groups, type, name) {
+  return (groups && groups[type] && groups[type].map[name]) || null;
+}
+function isParentName(groups, type, name) {
+  return !!(groups && groups[type] && groups[type].parents.includes(name));
+}
+function childrenOf(groups, type, parent) {
+  if (!groups || !groups[type]) return [];
+  return Object.entries(groups[type].map).filter(([, p]) => p === parent).map(([c]) => c);
+}
+// Category names a budget/filter on `name` covers: a parent -> all its
+// sub-categories, anything else -> just itself.
+function categoryScope(groups, type, name) {
+  return isParentName(groups, type, name) ? childrenOf(groups, type, name) : [name];
+}
+// Proposed groupings for categories that exist and aren't grouped yet.
+function suggestGroups(categories, groups) {
+  const out = [];
+  ["expense", "income"].forEach((type) => {
+    const existing = categories[type] || [];
+    const g = (groups && groups[type]) || { parents: [], map: {} };
+    SUGGESTED_GROUPS[type].forEach((s) => {
+      const lower = s.name.toLowerCase();
+      if (g.parents.some((p) => p.toLowerCase() === lower) || existing.some((x) => x.toLowerCase() === lower)) return;
+      const members = s.members.filter((m) => existing.includes(m) && !g.map[m]);
+      if (members.length >= 2) out.push({ type, name: s.name, members });
+    });
+  });
+  return out;
+}
+
 function emptyData() {
   return {
     entries: [], budgets: { expense: {}, income: {} }, recurring: [], masterBudgets: { expense: {}, income: {} }, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
     categories: { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
     categoryColors: {},
+    categoryGroups: normalizeCategoryGroups(null),
+    categoryGroupsPrompted: false,
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
@@ -637,6 +698,8 @@ export default function FinanceTracker() {
             quickAdds: parsed.quickAdds || QUICK_ADD_DEFAULTS,
             categories: parsed.categories || { expense: [...CATS_EXPENSE], income: [...CATS_INCOME] },
             categoryColors: parsed.categoryColors || {},
+            categoryGroups: normalizeCategoryGroups(parsed.categoryGroups),
+            categoryGroupsPrompted: !!parsed.categoryGroupsPrompted,
             theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
             profile: parsed.profile || { name: "" }
           });
@@ -872,6 +935,10 @@ export default function FinanceTracker() {
   };
 
   const addCategory = (type, name) => {
+    if (((data.categoryGroups[type] || {}).parents || []).some((p) => p.toLowerCase() === name.toLowerCase())) {
+      pushToast(`"${name}" is already a group name`, "danger", Tag);
+      return false;
+    }
     const exists = (data.categories[type] || []).some((c) => c.toLowerCase() === name.toLowerCase());
     setData((prev) => {
       const list = prev.categories[type] || [];
@@ -879,11 +946,94 @@ export default function FinanceTracker() {
       return { ...prev, categories: { ...prev.categories, [type]: [...list, name] } };
     });
     if (!exists) pushToast(`Category "${name}" added`, "success", Check);
+    return true;
   };
+
+  /* ----- category groups (parents) ----- */
+  const groupNameTaken = (type, name, ignore) => {
+    const lower = name.toLowerCase();
+    if (ignore && ignore.toLowerCase() === lower) return false;
+    return (data.categories[type] || []).some((x) => x.toLowerCase() === lower)
+      || data.categoryGroups[type].parents.some((p) => p.toLowerCase() === lower);
+  };
+  const addParent = (type, name) => {
+    const n = (name || "").trim();
+    if (!n) return false;
+    if (groupNameTaken(type, n)) { pushToast(`"${n}" is already used by a category or group`, "danger", Tag); return false; }
+    setData((prev) => ({ ...prev, categoryGroups: { ...prev.categoryGroups, [type]: { ...prev.categoryGroups[type], parents: [...prev.categoryGroups[type].parents, n] } } }));
+    pushToast(`Group "${n}" created`, "success", Tag);
+    return true;
+  };
+  const renameParent = (type, oldName, newName) => {
+    const n = (newName || "").trim();
+    if (!n || n === oldName) return;
+    if (groupNameTaken(type, n, oldName)) { pushToast(`"${n}" is already used by a category or group`, "danger", Tag); return; }
+    setData((prev) => {
+      const g = prev.categoryGroups[type];
+      const map = {};
+      Object.entries(g.map).forEach(([ch, p]) => { map[ch] = p === oldName ? n : p; });
+      const parents = g.parents.map((p) => p === oldName ? n : p);
+      let budgets = prev.budgets;
+      if (budgets[type] && budgets[type][oldName]) {
+        const grp = { ...budgets[type] };
+        grp[n] = { ...(grp[n] || {}), ...grp[oldName] };
+        delete grp[oldName];
+        budgets = { ...budgets, [type]: grp };
+      }
+      let categoryColors = prev.categoryColors || {};
+      if (categoryColors[oldName] != null) {
+        categoryColors = { ...categoryColors, [n]: categoryColors[oldName] };
+        delete categoryColors[oldName];
+      }
+      return { ...prev, categoryGroups: { ...prev.categoryGroups, [type]: { parents, map } }, budgets, categoryColors };
+    });
+    pushToast(`Renamed group "${oldName}" to "${n}"`, "success", Pencil);
+  };
+  const deleteParent = (type, name) => {
+    setData((prev) => {
+      const g = prev.categoryGroups[type];
+      const map = {};
+      Object.entries(g.map).forEach(([ch, p]) => { if (p !== name) map[ch] = p; });
+      let budgets = prev.budgets;
+      if (budgets[type] && budgets[type][name]) {
+        const grp = { ...budgets[type] };
+        delete grp[name];
+        budgets = { ...budgets, [type]: grp };
+      }
+      const categoryColors = { ...(prev.categoryColors || {}) };
+      delete categoryColors[name];
+      return { ...prev, categoryGroups: { ...prev.categoryGroups, [type]: { parents: g.parents.filter((p) => p !== name), map } }, budgets, categoryColors };
+    });
+    pushToast(`Group "${name}" removed — its categories are ungrouped`, "danger", Trash2);
+  };
+  const setCategoryParent = (type, category, parent) => {
+    setData((prev) => {
+      const g = prev.categoryGroups[type];
+      const map = { ...g.map };
+      if (parent) map[category] = parent; else delete map[category];
+      return { ...prev, categoryGroups: { ...prev.categoryGroups, [type]: { ...g, map } } };
+    });
+  };
+  const applyGroupSuggestions = (suggestions) => {
+    setData((prev) => {
+      const next = { expense: { parents: [...prev.categoryGroups.expense.parents], map: { ...prev.categoryGroups.expense.map } }, income: { parents: [...prev.categoryGroups.income.parents], map: { ...prev.categoryGroups.income.map } } };
+      suggestions.forEach((s) => {
+        if (!next[s.type].parents.includes(s.name)) next[s.type].parents.push(s.name);
+        s.members.forEach((m) => { next[s.type].map[m] = s.name; });
+      });
+      return { ...prev, categoryGroups: next, categoryGroupsPrompted: true };
+    });
+    pushToast("Category groups applied", "success", Tag);
+  };
+  const dismissGroupSuggestions = () => setData((prev) => ({ ...prev, categoryGroupsPrompted: true }));
 
   const renameCategory = (type, oldName, newName) => {
     const trimmed = newName.trim();
     if (!trimmed || trimmed === oldName) return;
+    if (data.categoryGroups[type].parents.some((p) => p.toLowerCase() === trimmed.toLowerCase())) {
+      pushToast(`"${trimmed}" is already a group name`, "danger", Tag);
+      return;
+    }
     setData((prev) => {
       const list = [...new Set(prev.categories[type].map((c) => c === oldName ? trimmed : c))];
       const entries = prev.entries.map((e) => e.type === type && e.category === oldName ? { ...e, category: trimmed } : e);
@@ -903,7 +1053,15 @@ export default function FinanceTracker() {
         categoryColors[trimmed] = categoryColors[oldName];
         delete categoryColors[oldName];
       }
-      return { ...prev, categories: { ...prev.categories, [type]: list }, entries, recurring, quickAdds, budgets, categoryColors };
+      let categoryGroups = prev.categoryGroups;
+      const gm = categoryGroups[type].map;
+      if (gm[oldName]) {
+        const map = { ...gm };
+        if (!(trimmed in map)) map[trimmed] = map[oldName];
+        delete map[oldName];
+        categoryGroups = { ...categoryGroups, [type]: { ...categoryGroups[type], map } };
+      }
+      return { ...prev, categories: { ...prev.categories, [type]: list }, entries, recurring, quickAdds, budgets, categoryColors, categoryGroups };
     });
     pushToast(`Renamed "${oldName}" to "${trimmed}"`, "success", Pencil);
   };
@@ -916,7 +1074,13 @@ export default function FinanceTracker() {
     setData((prev) => {
       const categoryColors = { ...(prev.categoryColors || {}) };
       delete categoryColors[name];
-      return { ...prev, categories: { ...prev.categories, [type]: prev.categories[type].filter((c) => c !== name) }, categoryColors };
+      let categoryGroups = prev.categoryGroups;
+      if (categoryGroups[type].map[name]) {
+        const map = { ...categoryGroups[type].map };
+        delete map[name];
+        categoryGroups = { ...categoryGroups, [type]: { ...categoryGroups[type], map } };
+      }
+      return { ...prev, categories: { ...prev.categories, [type]: prev.categories[type].filter((c) => c !== name) }, categoryColors, categoryGroups };
     });
     pushToast(`Category "${name}" removed`, "danger", Trash2);
   };
@@ -984,6 +1148,16 @@ export default function FinanceTracker() {
   useMemo(() => {
     CATEGORY_COLOR_OVERRIDES = data.categoryColors || {};
   }, [data.categoryColors]);
+
+  // And the category groups, so pickers and rows can show "Parent › Category".
+  useMemo(() => {
+    CATEGORY_GROUPS_LIVE = data.categoryGroups || EMPTY_GROUPS;
+  }, [data.categoryGroups]);
+
+  const groupSuggestions = useMemo(
+    () => (data.categoryGroupsPrompted ? [] : suggestGroups(data.categories, data.categoryGroups)),
+    [data.categoryGroupsPrompted, data.categories, data.categoryGroups]
+  );
 
   const NAV = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1073,6 +1247,10 @@ export default function FinanceTracker() {
           {tab === "dashboard" && (
             <Dashboard
               entries={data.entries}
+              groups={data.categoryGroups}
+              groupSuggestions={groupSuggestions}
+              onApplyGroups={applyGroupSuggestions}
+              onDismissGroups={dismissGroupSuggestions}
               budgets={data.budgets}
               masterBudgets={data.masterBudgets}
               accounts={data.accounts}
@@ -1114,12 +1292,13 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
             />
           )}
-          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} onBulkAdd={bulkAddEntries} preset={ledgerPreset} categories={data.categories} accounts={data.accounts} quickAdds={data.quickAdds} onAddCategory={addCategory} />}
+          {tab === "ledger" && <Ledger entries={data.entries} onRemove={removeEntry} onUpdate={updateEntry} onToggleBudget={toggleEntryBudget} onBulkAdd={bulkAddEntries} preset={ledgerPreset} catGroups={data.categoryGroups} categories={data.categories} accounts={data.accounts} quickAdds={data.quickAdds} onAddCategory={addCategory} />}
           {tab === "periods" && <Periods entries={reportEntries} accounts={data.accounts} />}
-          {tab === "insights" && <Insights entries={reportEntries} accounts={data.accounts} />}
+          {tab === "insights" && <Insights entries={reportEntries} accounts={data.accounts} groups={data.categoryGroups} />}
           {tab === "budgets" && (
             <Budgets
               entries={data.entries}
+              groups={data.categoryGroups}
               budgets={data.budgets}
               onSetBudget={setBudget}
               onRemoveBudget={removeBudget}
@@ -1156,6 +1335,11 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
               onSetCategoryColor={setCategoryColor}
               onResetCategoryColor={resetCategoryColor}
+              groupApi={{
+                groups: data.categoryGroups, suggestions: groupSuggestions,
+                onAddParent: addParent, onRenameParent: renameParent, onDeleteParent: deleteParent,
+                onSetParent: setCategoryParent, onApply: applyGroupSuggestions, onDismiss: dismissGroupSuggestions,
+              }}
               onResetAll={resetAllData}
             />
           )}
@@ -1167,7 +1351,36 @@ export default function FinanceTracker() {
 
 /* ---------- dashboard ---------- */
 
-function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
+function GroupSuggestionCard({ suggestions, onApply, onDismiss }) {
+  if (!suggestions || !suggestions.length) return null;
+  return (
+    <SectionCard title="Group your categories?" icon={<Tag size={13} />}>
+      <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 12 }}>
+        Parent categories bundle related ones together, so budgets and Insights can total them. Here's a suggested setup — you can change any of it later in Settings.
+      </div>
+      {suggestions.map((s) => (
+        <div key={s.type + s.name} style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 5 }}>
+            {s.name} <span style={{ fontWeight: 600, color: COLORS.mutedLight, fontSize: 11 }}>· {s.type}</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {s.members.map((m) => (
+              <span key={m} style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 999, background: withAlpha(catColor(m), "22"), color: catColor(m), fontSize: 11.5, fontWeight: 600 }}>
+                <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(m) }} />{m}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={() => onApply(suggestions)} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Apply groups</button>
+        <button onClick={onDismiss} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer", color: COLORS.muted }}>Not now</button>
+      </div>
+    </SectionCard>
+  );
+}
+
+function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismissGroups, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
   const [statScope, setStatScope] = useState("month");
   const cmk = thisMonthKey();
 
@@ -1198,11 +1411,17 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
   const budgetUsage = useMemo(() => {
     const withMonthly = Object.entries(budgets.expense || {}).filter(([, p]) => p.monthly != null);
     if (!withMonthly.length) return null;
-    const totalLimit = withMonthly.reduce((s, [, p]) => s + p.monthly, 0);
-    const cats = withMonthly.map(([c]) => c);
-    const spent = entries.filter((e) => e.type === "expense" && !isExcludedFrom(e, "monthly") && monthKey(e.date) === cmk && cats.includes(e.category)).reduce((s, e) => s + e.amount, 0);
+    // A sub-category budget under a budgeted parent already sits inside the parent's limit.
+    const counted = withMonthly.filter(([c]) => {
+      const par = parentOf(groups, "expense", c);
+      return !(par && withMonthly.some(([x]) => x === par));
+    });
+    const totalLimit = counted.reduce((s, [, p]) => s + p.monthly, 0);
+    const cats = new Set();
+    counted.forEach(([c]) => categoryScope(groups, "expense", c).forEach((x) => cats.add(x)));
+    const spent = entries.filter((e) => e.type === "expense" && !isExcludedFrom(e, "monthly") && monthKey(e.date) === cmk && cats.has(e.category)).reduce((s, e) => s + e.amount, 0);
     return { pct: totalLimit > 0 ? Math.round((spent / totalLimit) * 100) : 0, spent, totalLimit };
-  }, [entries, budgets, cmk]);
+  }, [entries, budgets, cmk, groups]);
 
   const upcoming = useMemo(() => {
     const today = new Date();
@@ -1226,9 +1445,9 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
       Object.entries(budgets[type] || {}).forEach(([category, periods]) => {
         Object.entries(periods).forEach(([pt, lim]) => {
           const r = periodRange(pt, now);
-          const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && e.category === category && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
+          const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && categoryScope(groups, type, category).includes(e.category) && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
           const pct = lim > 0 ? (spent / lim) * 100 : 0;
-          items.push({ label: `${category} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
+          items.push({ label: `${category}${isParentName(groups, type, category) ? " (group)" : ""} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
         });
       });
       ["daily", "weekly", "monthly"].forEach((pt) => {
@@ -1243,7 +1462,7 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
     // Every budget (and income goal) you've set shows up here, sorted by how close
     // it is to its limit — the ones actually worth watching naturally float to the top.
     return items.sort((a, b) => b.pct - a.pct);
-  }, [entries, budgets, masterBudgets]);
+  }, [entries, budgets, masterBudgets, groups]);
 
   const recent = useMemo(() => (
     [...entries].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt).slice(0, 5)
@@ -1259,6 +1478,13 @@ function Dashboard({ entries, budgets, masterBudgets, accounts, recurring, onQui
         <QuickAction icon={<Users size={18} />} color={COLORS.blue} label="Debts" onClick={onGoDebts} />
         <QuickAction icon={<Sparkles size={18} />} color={COLORS.orange} label="Insights" onClick={onGoInsights} />
       </div>
+
+      {groupSuggestions && groupSuggestions.length > 0 && (
+        <>
+          <GroupSuggestionCard suggestions={groupSuggestions} onApply={onApplyGroups} onDismiss={onDismissGroups} />
+          <div style={{ height: 16 }} />
+        </>
+      )}
 
       {owedToYou.count > 0 && (
         <>
@@ -2469,7 +2695,7 @@ function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
   );
 }
 
-function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset, categories, accounts, quickAdds, onAddCategory }) {
+function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset, categories, accounts, quickAdds, onAddCategory }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [periodType, setPeriodType] = useState("all");
@@ -2498,6 +2724,7 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
   const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
 
   const allCats = [...new Set([...categories.expense, ...categories.income])];
+  const allParents = [...new Set([...((catGroups && catGroups.expense.parents) || []), ...((catGroups && catGroups.income.parents) || [])])];
 
   const activeFilterCount = (periodType !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0) + (catFilter !== "all" ? 1 : 0) + (acctFilter !== "all" ? 1 : 0) + (!showAdjustments ? 1 : 0);
 
@@ -2514,11 +2741,11 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
     [...entries]
       .filter((e) => periodType === "all" || (e.date >= range.start && e.date <= range.end))
       .filter((e) => typeFilter === "all" || e.type === typeFilter)
-      .filter((e) => catFilter === "all" || e.category === catFilter)
+      .filter((e) => catFilter === "all" || e.category === catFilter || parentOf(catGroups, e.type, e.category) === catFilter)
       .filter(matchesAccount)
       .filter((e) => showAdjustments || !e.adjustment)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
-  ), [entries, periodType, range, typeFilter, catFilter, acctFilter, showAdjustments]);
+  ), [entries, periodType, range, typeFilter, catFilter, acctFilter, showAdjustments, catGroups]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, totalPages);
@@ -2612,7 +2839,14 @@ function Ledger({ entries, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset
           <FieldLabel>Category</FieldLabel>
           <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", marginBottom: 12 }}>
             <option value="all">All categories</option>
-            {allCats.map((c) => <option key={c} value={c}>{c}</option>)}
+            {allParents.length > 0 && (
+              <optgroup label="Groups (all categories inside)">
+                {allParents.map((p) => <option key={"g:" + p} value={p}>{p} (all)</option>)}
+              </optgroup>
+            )}
+            <optgroup label="Categories">
+              {allCats.map((c) => <option key={c} value={c}>{c}</option>)}
+            </optgroup>
           </select>
 
           {accounts.length > 0 && (
@@ -2756,12 +2990,14 @@ const navBtnStyle = {
 
 const ACCOUNT_PALETTE = ["#3B82F6", "#16A34A", "#8B5CF6", "#F43F5E", "#14B8A6", "#FBBF24", "#EC4899", "#6366F1", "#DC2626", "#06B6D4"];
 
-function Insights({ entries, accounts }) {
+function Insights({ entries, accounts, groups }) {
   const [periodType, setPeriodType] = useState("all");
   const [anchor, setAnchor] = useState(new Date());
   const [breakdownType, setBreakdownType] = useState("expense");
   const [groupBy, setGroupBy] = useState("category");
   const [chartView, setChartView] = useState("flow");
+  const [catView, setCatView] = useState("group");
+  const [drillOpen, setDrillOpen] = useState({});
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
   const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
@@ -2787,12 +3023,19 @@ function Insights({ entries, accounts }) {
   const pieData = useMemo(() => {
     const map = {};
     scopedByType.forEach((e) => {
-      const key = groupBy === "account" ? accountNameFor(e.accountId) : e.category;
+      const key = groupBy === "account" ? accountNameFor(e.accountId)
+        : (catView === "group" ? (parentOf(groups, e.type, e.category) || e.category) : e.category);
       map[key] = (map[key] || 0) + e.amount;
     });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopedByType, groupBy, accounts]);
+  }, [scopedByType, groupBy, accounts, catView, groups]);
+  const hasGroups = !!(groups && groups[breakdownType] && groups[breakdownType].parents.length > 0);
+  const childBreakdown = (parent) => {
+    const m = {};
+    scopedByType.forEach((e) => { if (parentOf(groups, breakdownType, e.category) === parent) m[e.category] = (m[e.category] || 0) + e.amount; });
+    return Object.entries(m).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  };
   const breakdownTotal = pieData.reduce((s, d) => s + d.value, 0);
 
   const expenseTotal = useMemo(() => scopedExpenses.reduce((s, e) => s + e.amount, 0), [scopedExpenses]);
@@ -2934,6 +3177,18 @@ function Insights({ entries, accounts }) {
             ))}
           </div>
         )}
+        {groupBy === "category" && hasGroups && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+            {[["group", "Grouped"], ["sub", "Sub-categories"]].map(([id, label]) => (
+              <button key={id} onClick={() => setCatView(id)} style={{
+                padding: "6px 12px", borderRadius: 999, border: "1px solid " + (catView === id ? COLORS.orange : COLORS.border),
+                background: catView === id ? COLORS.orangeLight : COLORS.card, color: catView === id ? COLORS.orangeDark : COLORS.muted,
+                fontSize: 11.5, fontWeight: 700, cursor: "pointer"
+              }}>{label}</button>
+            ))}
+            {catView === "group" && <span style={{ fontSize: 11, color: COLORS.mutedLight, alignSelf: "center" }}>Tap a group to see what's inside</span>}
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
           <SummaryCard icon={<Wallet size={16} />} label={breakdownType === "expense" ? "Avg Daily Spend" : "Avg Daily Income"} value={fmt(avgPerDay)} color={COLORS.orange} />
           <SummaryCard icon={breakdownType === "expense" ? <TrendingUp size={16} /> : <TrendingDown size={16} />} label={breakdownType === "expense" ? "Income" : "Expenses"} value={fmt(breakdownType === "expense" ? incomeTotal : expenseTotal)} color={breakdownType === "expense" ? COLORS.green : COLORS.rose} />
@@ -2962,10 +3217,14 @@ function Insights({ entries, accounts }) {
             <div>
               {pieData.slice(0, 6).map((d) => {
                 const pct = breakdownTotal > 0 ? (d.value / breakdownTotal) * 100 : 0;
+                const drillable = groupBy === "category" && catView === "group" && isParentName(groups, breakdownType, d.name);
+                const isOpen = drillable && !!drillOpen[d.name];
                 return (
                   <div key={d.name} style={{ marginBottom: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                    <div onClick={drillable ? () => setDrillOpen((o) => ({ ...o, [d.name]: !o[d.name] })) : undefined}
+                      style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4, cursor: drillable ? "pointer" : "default" }}>
                       <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                        {drillable && <ChevronDown size={12} style={{ color: COLORS.muted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />}
                         <span style={{ width: 8, height: 8, borderRadius: 2, background: colorFor(d.name) }} />{d.name}
                       </span>
                       <span className="mono" style={{ color: COLORS.muted }}>{fmt(d.value)} · {pct.toFixed(0)}%</span>
@@ -2973,6 +3232,18 @@ function Insights({ entries, accounts }) {
                     <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
                       <div style={{ height: "100%", width: `${pct}%`, background: colorFor(d.name), borderRadius: 4 }} />
                     </div>
+                    {isOpen && (
+                      <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: "4px 10px" }}>
+                        {childBreakdown(d.name).map((ch, i, arr) => (
+                          <div key={ch.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < arr.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                            <span style={{ display: "flex", alignItems: "center", gap: 6, color: COLORS.muted }}>
+                              <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(ch.name) }} />{ch.name}
+                            </span>
+                            <span className="mono">{fmt(ch.value)} · {d.value > 0 ? ((ch.value / d.value) * 100).toFixed(0) : 0}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -3028,7 +3299,7 @@ function CompareRow({ label, current, previous, higherIsBetter }) {
 
 /* ---------- budgets ---------- */
 
-function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets, onSetMasterBudget, onRemoveMasterBudget, categories, onAddCategory }) {
+function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, masterBudgets, onSetMasterBudget, onRemoveMasterBudget, categories, onAddCategory }) {
   const [budgetType, setBudgetType] = useState("expense");
   const [cat, setCat] = useState(categories.expense[0]);
   const [period, setPeriod] = useState("monthly");
@@ -3048,8 +3319,9 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
   // expandable "Show transactions" breakdown.
   const categoryPeriodInfo = (category, periodType) => {
     const range = periodRange(periodType, new Date());
+    const scope = categoryScope(groups, budgetType, category);
     const transactions = entries
-      .filter((e) => e.type === budgetType && !isExcludedFrom(e, periodType) && e.category === category && e.date >= range.start && e.date <= range.end)
+      .filter((e) => e.type === budgetType && !isExcludedFrom(e, periodType) && scope.includes(e.category) && e.date >= range.start && e.date <= range.end)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
     return { range, transactions, spent: transactions.reduce((s, e) => s + e.amount, 0) };
   };
@@ -3117,7 +3389,7 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
           <div>
             <FieldLabel>Category</FieldLabel>
-            <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} />
+            <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} allowGroups />
           </div>
           <div>
             <FieldLabel>Period</FieldLabel>
@@ -3147,6 +3419,12 @@ function Budgets({ entries, budgets, onSetBudget, onRemoveBudget, masterBudgets,
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
               <span style={{ width: 9, height: 9, borderRadius: 3, background: catColor(category) }} />
               <span style={{ fontWeight: 700, fontSize: 13.5 }}>{category}</span>
+              {isParentName(groups, budgetType, category) && (
+                <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600 }}>Group · {childrenOf(groups, budgetType, category).join(", ") || "no categories yet"}</span>
+              )}
+              {parentOf(groups, budgetType, category) && (
+                <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600 }}>in {parentOf(groups, budgetType, category)}</span>
+              )}
             </div>
             {["daily", "weekly", "monthly"].filter((pt) => periods[pt] != null).map((pt) => {
               const lim = periods[pt];
@@ -3537,40 +3815,128 @@ function Sidebar({ open, onClose, NAV, tab, setTab, profileName }) {
 
 /* ---------- settings ---------- */
 
-function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory, onSetColor, onResetColor }) {
+function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory, onSetColor, onResetColor, groupApi }) {
   const [typeTab, setTypeTab] = useState("expense");
   const [editingName, setEditingName] = useState(null);
   const [editValue, setEditValue] = useState("");
+  const [editingGroup, setEditingGroup] = useState(null);
+  const [groupEditValue, setGroupEditValue] = useState("");
   const [newName, setNewName] = useState("");
+  const [newGroup, setNewGroup] = useState("");
   const [colorEditing, setColorEditing] = useState(null);
 
   const usageCount = (name) => entries.filter((e) => e.type === typeTab && e.category === name).length;
+  const g = groupApi ? groupApi.groups[typeTab] : { parents: [], map: {} };
 
-  const startEdit = (name) => { setColorEditing(null); setEditingName(name); setEditValue(name); };
-  const toggleColorEditing = (name) => { setEditingName(null); setColorEditing((v) => v === name ? null : name); };
+  const startEdit = (name) => { setColorEditing(null); setEditingGroup(null); setEditingName(name); setEditValue(name); };
+  const toggleColorEditing = (name) => { setEditingName(null); setEditingGroup(null); setColorEditing((v) => v === name ? null : name); };
   const commitEdit = () => {
     const trimmed = editValue.trim();
     if (trimmed && trimmed !== editingName) onRename(typeTab, editingName, trimmed);
     setEditingName(null);
   };
+  const startGroupEdit = (name) => { setColorEditing(null); setEditingName(null); setEditingGroup(name); setGroupEditValue(name); };
+  const commitGroupEdit = () => {
+    const trimmed = groupEditValue.trim();
+    if (trimmed && trimmed !== editingGroup) groupApi.onRenameParent(typeTab, editingGroup, trimmed);
+    setEditingGroup(null);
+  };
 
   const addNew = () => {
     if (!newName.trim()) return;
-    onAddCategory(typeTab, newName.trim());
-    setNewName("");
+    if (onAddCategory(typeTab, newName.trim()) !== false) setNewName("");
+  };
+  const addGroup = () => {
+    if (!newGroup.trim()) return;
+    if (groupApi.onAddParent(typeTab, newGroup)) setNewGroup("");
   };
 
   const list = categories[typeTab];
+  const grouped = g.parents.map((p) => ({ parent: p, items: list.filter((c) => g.map[c] === p) }));
+  const ungrouped = list.filter((c) => !g.map[c] || !g.parents.includes(g.map[c]));
+  const iconBtn = { background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" };
+  const typeSuggestions = groupApi ? groupApi.suggestions.filter((s) => s.type === typeTab) : [];
+
+  const renderRow = (c, isLast, indented) => (
+    <div key={c} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "9px 2px", paddingLeft: indented ? 22 : 2, borderBottom: isLast && colorEditing !== c ? "none" : "1px solid " + COLORS.border }}>
+      {editingName === c ? (
+        <>
+          <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingName(null); }}
+            style={{ flex: 1, minWidth: 0, fontSize: 13.5 }} />
+          <button onClick={commitEdit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+            <Check size={12} />
+          </button>
+          <button onClick={() => setEditingName(null)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>
+            ✕
+          </button>
+        </>
+      ) : (
+        <>
+          <button onClick={() => toggleColorEditing(c)} aria-label={`Change color for ${c}`} style={{
+            width: 16, height: 16, borderRadius: 5, background: catColor(c), minWidth: 16, border: "none", padding: 0, cursor: "pointer",
+            boxShadow: colorEditing === c ? `0 0 0 2px ${COLORS.card}, 0 0 0 4px ${catColor(c)}` : "none"
+          }} />
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c}</span>
+          <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usageCount(c)} used</span>
+          {groupApi && g.parents.length > 0 && (
+            <select value={g.map[c] || ""} onChange={(e) => groupApi.onSetParent(typeTab, c, e.target.value || null)}
+              aria-label={`Group for ${c}`} style={{ fontSize: 11.5, padding: "4px 6px", maxWidth: 120 }}>
+              <option value="">No group</option>
+              {g.parents.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          )}
+          <button onClick={() => startEdit(c)} style={iconBtn}><Pencil size={13} /></button>
+          <button onClick={() => onDelete(typeTab, c)} style={iconBtn}><Trash2 size={13} /></button>
+        </>
+      )}
+      {colorEditing === c && (
+        <div style={{ flexBasis: "100%", width: "100%", padding: "10px 10px 12px", marginTop: 2, borderRadius: 12, background: COLORS.bg }}>
+          <CategoryColorPicker value={catColor(c)} onChange={(hex) => onSetColor(c, hex)} onReset={() => onResetColor(c)} />
+        </div>
+      )}
+    </div>
+  );
+
+  const renderGroupHeader = (p, count) => (
+    <div key={"group:" + p} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "10px 2px 6px", marginTop: 6 }}>
+      {editingGroup === p ? (
+        <>
+          <input autoFocus value={groupEditValue} onChange={(e) => setGroupEditValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commitGroupEdit(); if (e.key === "Escape") setEditingGroup(null); }}
+            style={{ flex: 1, minWidth: 0, fontSize: 13.5 }} />
+          <button onClick={commitGroupEdit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}><Check size={12} /></button>
+          <button onClick={() => setEditingGroup(null)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>
+        </>
+      ) : (
+        <>
+          <button onClick={() => toggleColorEditing(p)} aria-label={`Change color for ${p}`} style={{
+            width: 16, height: 16, borderRadius: 5, background: catColor(p), minWidth: 16, border: "none", padding: 0, cursor: "pointer",
+            boxShadow: colorEditing === p ? `0 0 0 2px ${COLORS.card}, 0 0 0 4px ${catColor(p)}` : "none"
+          }} />
+          <span style={{ flex: 1, fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p}</span>
+          <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{count} categor{count === 1 ? "y" : "ies"}</span>
+          <button onClick={() => startGroupEdit(p)} style={iconBtn}><Pencil size={13} /></button>
+          <button onClick={() => groupApi.onDeleteParent(typeTab, p)} style={iconBtn} title="Remove group (categories stay)"><Trash2 size={13} /></button>
+        </>
+      )}
+      {colorEditing === p && (
+        <div style={{ flexBasis: "100%", width: "100%", padding: "10px 10px 12px", marginTop: 2, borderRadius: 12, background: COLORS.bg }}>
+          <CategoryColorPicker value={catColor(p)} onChange={(hex) => onSetColor(p, hex)} onReset={() => onResetColor(p)} />
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <SectionCard title="Categories" icon={<Tag size={13} />}>
       <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-        Rename or remove categories. Renaming updates every transaction, budget, and recurring item that uses it — deleting just stops offering it for new entries, past transactions keep their label.
+        Rename or remove categories, and bundle related ones under a group (e.g. Food and Groceries under "Food & Drink"). Budgets and Insights can then total a whole group. Renaming updates every transaction, budget, and recurring item that uses it — deleting just stops offering it for new entries, past transactions keep their label.
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[["expense", "Expense"], ["income", "Income"]].map(([id, label]) => (
-          <button key={id} onClick={() => { setTypeTab(id); setEditingName(null); setColorEditing(null); }} style={{
+          <button key={id} onClick={() => { setTypeTab(id); setEditingName(null); setEditingGroup(null); setColorEditing(null); }} style={{
             flex: 1, padding: "8px 10px", borderRadius: 10, border: "1px solid " + (typeTab === id ? COLORS.orange : COLORS.border),
             background: typeTab === id ? COLORS.orangeLight : COLORS.card, color: typeTab === id ? COLORS.orangeDark : COLORS.muted,
             fontWeight: 700, fontSize: 12.5, cursor: "pointer"
@@ -3578,43 +3944,33 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
         ))}
       </div>
 
-      {list.map((c, i) => (
-        <div key={c} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "9px 2px", borderBottom: i === list.length - 1 && colorEditing !== c ? "none" : "1px solid " + COLORS.border }}>
-          {editingName === c ? (
-            <>
-              <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingName(null); }}
-                style={{ flex: 1, minWidth: 0, fontSize: 13.5 }} />
-              <button onClick={commitEdit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
-                <Check size={12} />
-              </button>
-              <button onClick={() => setEditingName(null)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>
-                ✕
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => toggleColorEditing(c)} aria-label={`Change color for ${c}`} style={{
-                width: 16, height: 16, borderRadius: 5, background: catColor(c), minWidth: 16, border: "none", padding: 0, cursor: "pointer",
-                boxShadow: colorEditing === c ? `0 0 0 2px ${COLORS.card}, 0 0 0 4px ${catColor(c)}` : "none"
-              }} />
-              <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c}</span>
-              <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usageCount(c)} used</span>
-              <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-                <Pencil size={13} />
-              </button>
-              <button onClick={() => onDelete(typeTab, c)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-                <Trash2 size={13} />
-              </button>
-            </>
-          )}
-          {colorEditing === c && (
-            <div style={{ flexBasis: "100%", width: "100%", padding: "10px 10px 12px", marginTop: 2, borderRadius: 12, background: COLORS.bg }}>
-              <CategoryColorPicker value={catColor(c)} onChange={(hex) => onSetColor(c, hex)} onReset={() => onResetColor(c)} />
+      {groupApi && typeSuggestions.length > 0 && (
+        <div style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 12, padding: 12, marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>Suggested groups</div>
+          {typeSuggestions.map((s) => (
+            <div key={s.name} style={{ fontSize: 12, color: COLORS.muted, marginBottom: 3 }}>
+              <strong style={{ color: COLORS.text }}>{s.name}</strong> — {s.members.join(", ")}
             </div>
-          )}
+          ))}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={() => groupApi.onApply(groupApi.suggestions)} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Apply suggestions</button>
+            <button onClick={groupApi.onDismiss} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>Not now</button>
+          </div>
+        </div>
+      )}
+
+      {grouped.map((sec) => (
+        <div key={sec.parent}>
+          {renderGroupHeader(sec.parent, sec.items.length)}
+          {sec.items.length === 0 && <div style={{ fontSize: 11.5, color: COLORS.mutedLight, padding: "2px 2px 8px 22px" }}>Empty — assign categories to it with their "Group" menu.</div>}
+          {sec.items.map((c, i) => renderRow(c, false, true))}
         </div>
       ))}
+
+      {g.parents.length > 0 && ungrouped.length > 0 && (
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: COLORS.mutedLight, padding: "14px 2px 2px" }}>Ungrouped</div>
+      )}
+      {ungrouped.map((c, i) => renderRow(c, i === ungrouped.length - 1, false))}
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <input type="text" placeholder="New category name" value={newName} onChange={(e) => setNewName(e.target.value)}
@@ -3623,6 +3979,16 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
           + Add
         </button>
       </div>
+
+      {groupApi && (
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <input type="text" placeholder="New group name (e.g. Food & Drink)" value={newGroup} onChange={(e) => setNewGroup(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addGroup()} style={{ flex: 1, minWidth: 0 }} />
+          <button onClick={addGroup} style={{ background: COLORS.card, color: COLORS.muted, border: "1px solid " + COLORS.border, borderRadius: 10, padding: "0 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            + Group
+          </button>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -3704,7 +4070,7 @@ function AccentColorPicker({ value, onChange }) {
   );
 }
 
-function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, onResetAll }) {
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, groupApi, onResetAll }) {
   const [name, setName] = useState(profile.name);
 
   useEffect(() => { setName(profile.name); }, [profile.name]);
@@ -3793,7 +4159,7 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
 
       <div style={{ height: 16 }} />
 
-      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} />
+      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} groupApi={groupApi} />
 
       <div style={{ height: 16 }} />
 
@@ -3983,7 +4349,8 @@ function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }
     subtitle = `${fromName} → ${toName}`;
   } else {
     title = e.note || e.category;
-    subtitle = e.categoryLabel || e.category;
+    const par = parentOf(CATEGORY_GROUPS_LIVE, e.type, e.category);
+    subtitle = e.categoryLabel || (par ? `${par} › ${e.category}` : e.category);
   }
 
   return (
@@ -4215,7 +4582,7 @@ function AccountTypeSelect({ value, onChange, compact }) {
   return <IconPillSelect value={value} onChange={onChange} items={items} compact={compact} />;
 }
 
-function CategorySelect({ value, onChange, options, type, onAddCategory, compact }) {
+function CategorySelect({ value, onChange, options, type, onAddCategory, compact, allowGroups }) {
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -4232,7 +4599,7 @@ function CategorySelect({ value, onChange, options, type, onAddCategory, compact
   const commit = () => {
     const name = newName.trim();
     if (!name) { setAdding(false); return; }
-    onAddCategory(type, name);
+    if (onAddCategory(type, name) === false) return;
     onChange(name);
     setNewName("");
     setAdding(false);
@@ -4241,6 +4608,30 @@ function CategorySelect({ value, onChange, options, type, onAddCategory, compact
 
   const pick = (c) => { onChange(c); setOpen(false); };
   const color = catColor(value);
+
+  // Options are shown under their parent group when the type has any; with
+  // allowGroups (budgets), the group itself is also pickable ("covers all").
+  const gset = (type && CATEGORY_GROUPS_LIVE[type]) || EMPTY_GROUPS.expense;
+  const sections = gset.parents
+    .map((p) => ({ parent: p, items: options.filter((o) => gset.map[o] === p) }))
+    .filter((s) => s.items.length > 0);
+  const ungrouped = options.filter((o) => !gset.map[o] || !gset.parents.includes(gset.map[o]));
+  const pill = (c, isGroup) => {
+    const active = c === value;
+    const optColor = catColor(c);
+    return (
+      <button key={(isGroup ? "g:" : "") + c} type="button" onClick={() => pick(c)} style={{
+        display: "flex", alignItems: "center", gap: 6, padding: "6px 11px", borderRadius: 999,
+        border: "1px solid " + (active ? optColor : COLORS.border),
+        background: active ? withAlpha(optColor, "22") : COLORS.bg,
+        color: active ? optColor : COLORS.text, fontSize: 12.5, fontWeight: isGroup ? 800 : 600, cursor: "pointer"
+      }}>
+        <span style={{ width: 7, height: 7, borderRadius: 2, background: optColor, flexShrink: 0 }} />
+        {isGroup ? `${c} (all)` : c}
+      </button>
+    );
+  };
+  const sectionLabel = { fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: COLORS.mutedLight, marginBottom: 6 };
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -4271,23 +4662,26 @@ function CategorySelect({ value, onChange, options, type, onAddCategory, compact
             </div>
           ) : (
             <>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {options.map((c) => {
-                  const active = c === value;
-                  const optColor = catColor(c);
-                  return (
-                    <button key={c} type="button" onClick={() => pick(c)} style={{
-                      display: "flex", alignItems: "center", gap: 6, padding: "6px 11px", borderRadius: 999,
-                      border: "1px solid " + (active ? optColor : COLORS.border),
-                      background: active ? withAlpha(optColor, "22") : COLORS.bg,
-                      color: active ? optColor : COLORS.text, fontSize: 12.5, fontWeight: 600, cursor: "pointer"
-                    }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 2, background: optColor, flexShrink: 0 }} />
-                      {c}
-                    </button>
-                  );
-                })}
-              </div>
+              {sections.length === 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {options.map((o) => pill(o, false))}
+                </div>
+              ) : (
+                <div>
+                  {sections.map((s) => (
+                    <div key={s.parent} style={{ marginBottom: 10 }}>
+                      {allowGroups ? <div style={{ marginBottom: 6 }}>{pill(s.parent, true)}</div> : <div style={sectionLabel}>{s.parent}</div>}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{s.items.map((o) => pill(o, false))}</div>
+                    </div>
+                  ))}
+                  {ungrouped.length > 0 && (
+                    <div>
+                      <div style={sectionLabel}>Ungrouped</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{ungrouped.map((o) => pill(o, false))}</div>
+                    </div>
+                  )}
+                </div>
+              )}
               {onAddCategory && (
                 <button type="button" onClick={() => setAdding(true)} style={{
                   marginTop: 8, width: "100%", background: "none", border: "1px dashed " + COLORS.border, borderRadius: 999,
