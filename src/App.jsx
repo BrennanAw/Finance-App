@@ -9,7 +9,8 @@ import {
   LayoutDashboard, List, PiggyBank, Repeat, Users, Zap, Power,
   CalendarDays, ChevronLeft, ChevronRight, Target, BarChart3, Sparkles,
   Landmark, Banknote, CreditCard, CircleDollarSign, HandCoins, Pencil, Check,
-  Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag, Upload
+  Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag, Upload,
+  Briefcase, Coins, Home, Car, GraduationCap, Gift, ShoppingBag, Smartphone, Building2, Gem, Heart, Star, Plane
 } from "lucide-react";
 
 /* ---------- design tokens ---------- */
@@ -125,6 +126,25 @@ const daysInMonth = (year, month1to12) => new Date(year, month1to12, 0).getDate(
 // category names; a match anywhere (case-insensitive) in the free-text note
 // picks that category, unless the text already names an existing category or
 // quick add directly.
+// Icons a custom account type can use, keyed by a stable name so the choice
+// survives in saved data.
+const ACCOUNT_ICON_OPTIONS = {
+  landmark: Landmark, wallet: Wallet, banknote: Banknote, piggy: PiggyBank, card: CreditCard, trending: TrendingUp,
+  coins: Coins, briefcase: Briefcase, home: Home, car: Car, graduation: GraduationCap, gift: Gift,
+  shopping: ShoppingBag, phone: Smartphone, building: Building2, gem: Gem, heart: Heart, star: Star, plane: Plane,
+};
+let CUSTOM_ACCOUNT_TYPES_LIVE = [];
+// Built-in types first, then the user's own, with "Other" always last.
+function getAccountTypes() {
+  const other = ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+  const custom = CUSTOM_ACCOUNT_TYPES_LIVE.map((t) => ({ id: t.id, label: t.label, icon: ACCOUNT_ICON_OPTIONS[t.icon] || CircleDollarSign, color: t.color, custom: true }));
+  return [...ACCOUNT_TYPES.slice(0, -1), ...custom, other];
+}
+function accountTypeInfo(id) {
+  const all = getAccountTypes();
+  return all.find((t) => t.id === id) || all[all.length - 1];
+}
+
 const CATEGORY_KEYWORDS = {
   Food: ["food", "lunch", "dinner", "breakfast", "brunch", "eat", "restaurant", "kopitiam", "meal", "snack", "cafe", "coffee", "makan", "mamak"],
   Groceries: ["grocery", "groceries", "mart", "supermarket", "market", "tesco", "giant", "lotus", "jaya grocer", "aeon"],
@@ -526,6 +546,8 @@ function buildTrend(entries, granularity, anchor, count) {
   }
   return buckets;
 }
+// A recurring item with an end date stops generating after that day.
+function isRecurringEnded(r) { return !!(r.endDate && r.endDate < todayISO()); }
 function nextRecurringDate(r, from) {
   const d = new Date(from);
   d.setHours(0, 0, 0, 0);
@@ -616,6 +638,7 @@ function emptyData() {
     categoryColors: {},
     categoryGroups: normalizeCategoryGroups(null),
     categoryGroupsPrompted: false,
+    customAccountTypes: [],
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
@@ -700,6 +723,7 @@ export default function FinanceTracker() {
             categoryColors: parsed.categoryColors || {},
             categoryGroups: normalizeCategoryGroups(parsed.categoryGroups),
             categoryGroupsPrompted: !!parsed.categoryGroupsPrompted,
+            customAccountTypes: Array.isArray(parsed.customAccountTypes) ? parsed.customAccountTypes : [],
             theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
             profile: parsed.profile || { name: "" }
           });
@@ -736,7 +760,7 @@ export default function FinanceTracker() {
         if (r.frequency === "weekly") {
           if (r.lastRun === wk) return r;
           const occurrenceDate = addDays(getMonday(today), (r.day + 6) % 7);
-          if (today >= occurrenceDate) {
+          if (today >= occurrenceDate && !(r.endDate && isoOf(occurrenceDate) > r.endDate)) {
             newEntries.push({
               id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
               category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: isoOf(occurrenceDate), recurring: true, accountId: r.accountId || null
@@ -748,8 +772,8 @@ export default function FinanceTracker() {
         if (r.lastRun === cmk) return r;
         const dim = daysInMonth(today.getFullYear(), today.getMonth() + 1);
         const runDay = Math.min(r.day, dim);
-        if (today.getDate() >= runDay) {
-          const dateStr = `${cmk}-${String(runDay).padStart(2, "0")}`;
+        const dateStr = `${cmk}-${String(runDay).padStart(2, "0")}`;
+        if (today.getDate() >= runDay && !(r.endDate && dateStr > r.endDate)) {
           newEntries.push({
             id: uid(), createdAt: Date.now(), type: r.type, amount: r.amount,
             category: r.category, categoryLabel: r.categoryLabel || "", note: r.name, date: dateStr, recurring: true, accountId: r.accountId || null
@@ -862,7 +886,7 @@ export default function FinanceTracker() {
 
   const runRecurringNow = (id) => {
     const r = data.recurring.find((x) => x.id === id);
-    if (!r || !r.active) return;
+    if (!r || !r.active || isRecurringEnded(r)) return;
     const periodKey = (r.frequency || "monthly") === "weekly" ? isoOf(getMonday(new Date())) : thisMonthKey();
     if (r.lastRun === periodKey) return;
     const entry = {
@@ -923,6 +947,42 @@ export default function FinanceTracker() {
     }));
     pushToast(`Account removed${acc ? " — " + acc.name : ""}`, "danger", Trash2);
   };
+
+  const accountTypeNameError = (label, ignoreId) => {
+    const n = (label || "").trim();
+    if (!n) return "Give the type a name.";
+    const lower = n.toLowerCase();
+    if (getAccountTypes().some((t) => t.id !== ignoreId && t.label.toLowerCase() === lower)) return `"${n}" already exists.`;
+    return null;
+  };
+  const addAccountType = (label, icon, color) => {
+    const err = accountTypeNameError(label);
+    if (err) return { ok: false, error: err };
+    const id = "custom_" + uid();
+    setData((prev) => ({ ...prev, customAccountTypes: [...(prev.customAccountTypes || []), { id, label: label.trim(), icon, color }] }));
+    pushToast(`Account type "${label.trim()}" added`, "success", Landmark);
+    return { ok: true, id };
+  };
+  const updateAccountType = (id, patch) => {
+    if (patch.label !== undefined) {
+      const err = accountTypeNameError(patch.label, id);
+      if (err) { pushToast(err, "danger", Landmark); return { ok: false, error: err }; }
+      patch = { ...patch, label: patch.label.trim() };
+    }
+    setData((prev) => ({ ...prev, customAccountTypes: (prev.customAccountTypes || []).map((t) => t.id === id ? { ...t, ...patch } : t) }));
+    return { ok: true };
+  };
+  const removeAccountType = (id) => {
+    const t = (data.customAccountTypes || []).find((x) => x.id === id);
+    if (!t) return;
+    setData((prev) => ({
+      ...prev,
+      customAccountTypes: (prev.customAccountTypes || []).filter((x) => x.id !== id),
+      accounts: prev.accounts.map((a) => a.type === id ? { ...a, type: "other", customType: t.label } : a),
+    }));
+    pushToast(`Account type "${t.label}" removed`, "danger", Trash2);
+  };
+  const accountTypeApi = { types: data.customAccountTypes || [], onAdd: addAccountType, onUpdate: updateAccountType, onRemove: removeAccountType };
 
   const addQuickAdd = (item) => {
     setData((prev) => ({ ...prev, quickAdds: [...prev.quickAdds, { id: uid(), ...item }] }));
@@ -1154,6 +1214,12 @@ export default function FinanceTracker() {
     CATEGORY_GROUPS_LIVE = data.categoryGroups || EMPTY_GROUPS;
   }, [data.categoryGroups]);
 
+  // Custom account types, same live-variable trick so every account row and
+  // picker resolves them without prop threading.
+  useMemo(() => {
+    CUSTOM_ACCOUNT_TYPES_LIVE = data.customAccountTypes || [];
+  }, [data.customAccountTypes]);
+
   const groupSuggestions = useMemo(
     () => (data.categoryGroupsPrompted ? [] : suggestGroups(data.categories, data.categoryGroups)),
     [data.categoryGroupsPrompted, data.categories, data.categoryGroups]
@@ -1274,6 +1340,7 @@ export default function FinanceTracker() {
               onUpdateEntry={updateEntry}
               onRemoveEntry={removeEntry}
               onReconcile={reconcileAccount}
+              accountTypeApi={accountTypeApi}
               categories={data.categories}
               onAddCategory={addCategory}
             />
@@ -1335,6 +1402,8 @@ export default function FinanceTracker() {
               onAddCategory={addCategory}
               onSetCategoryColor={setCategoryColor}
               onResetCategoryColor={resetCategoryColor}
+              accountTypeApi={accountTypeApi}
+              accounts={data.accounts}
               groupApi={{
                 groups: data.categoryGroups, suggestions: groupSuggestions,
                 onAddParent: addParent, onRenameParent: renameParent, onDeleteParent: deleteParent,
@@ -1427,12 +1496,13 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     return recurring
-      .filter((r) => r.active)
+      .filter((r) => r.active && !isRecurringEnded(r))
       .map((r) => {
         const next = nextRecurringDate(r, today);
         const days = Math.round((next - today) / 86400000);
-        return { ...r, days };
+        return { ...r, days, nextIso: isoOf(next) };
       })
+      .filter((r) => !r.endDate || r.nextIso <= r.endDate)
       .sort((a, b) => a.days - b.days)
       .slice(0, 3);
   }, [recurring]);
@@ -1698,7 +1768,7 @@ function AccountDetail({ account, entries, accounts, balance, onBack, onUpdateEn
     return { inFlow, outFlow };
   }, [related, account.id]);
 
-  const typeInfo = ACCOUNT_TYPES.find((t) => t.id === account.type) || ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+  const typeInfo = accountTypeInfo(account.type);
   const Icon = typeInfo.icon;
 
   return (
@@ -1867,7 +1937,7 @@ function ReconcilePanel({ account, balance, related, onReconcile }) {
   );
 }
 
-function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry, onRemoveEntry, onReconcile, categories, onAddCategory }) {
+function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry, onRemoveEntry, onReconcile, accountTypeApi, categories, onAddCategory }) {
   const [form, setForm] = useState({ name: "", type: "bank", customType: "", initialBalance: "" });
   const [error, setError] = useState("");
   const [selectedId, setSelectedId] = useState(null);
@@ -1950,7 +2020,7 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
           </div>
           <div>
             <FieldLabel>Type</FieldLabel>
-            <AccountTypeSelect value={form.type} onChange={(id) => setForm((f) => ({ ...f, type: id }))} />
+            <AccountTypeSelect value={form.type} onChange={(id) => setForm((f) => ({ ...f, type: id }))} api={accountTypeApi} />
           </div>
           <div>
             <FieldLabel>Initial Balance (RM)</FieldLabel>
@@ -1974,14 +2044,14 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
       <SectionCard title="Your Accounts">
         {accounts.length === 0 && <EmptyNote>No accounts yet. Add your bank, e-wallet, or cash on hand above to start tracking real balances.</EmptyNote>}
         {accounts.map((a, i) => (
-          <AccountRow key={a.id} account={a} balance={balanceFor(a.id)} onUpdate={onUpdate} onRemove={onRemove} onView={setSelectedId} isLast={i === accounts.length - 1} />
+          <AccountRow key={a.id} account={a} accountTypeApi={accountTypeApi} balance={balanceFor(a.id)} onUpdate={onUpdate} onRemove={onRemove} onView={setSelectedId} isLast={i === accounts.length - 1} />
         ))}
       </SectionCard>
     </div>
   );
 }
 
-function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
+function AccountRow({ account, accountTypeApi, balance, onUpdate, onRemove, onView, isLast }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
   const [type, setType] = useState(account.type);
@@ -1991,7 +2061,7 @@ function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
     setName(account.name); setType(account.type); setCustomType(account.customType || "");
   }, [account]);
 
-  const typeInfo = ACCOUNT_TYPES.find((t) => t.id === type) || ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+  const typeInfo = accountTypeInfo(type);
   const Icon = typeInfo.icon;
   const delta = balance - account.initialBalance;
 
@@ -2006,7 +2076,7 @@ function AccountRow({ account, balance, onUpdate, onRemove, onView, isLast }) {
       <div style={{ padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, marginBottom: 8 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} style={{ fontSize: 13 }} />
-          <AccountTypeSelect value={type} onChange={setType} compact />
+          <AccountTypeSelect value={type} onChange={setType} compact api={accountTypeApi} />
         </div>
         {type === "other" && (
           <input placeholder="Custom type label (optional)" value={customType} onChange={(e) => setCustomType(e.target.value)}
@@ -2695,11 +2765,64 @@ function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
   );
 }
 
+// A user-defined date range ("custom" period) as { start, end, label }. A missing
+// bound is treated as open-ended so a half-typed range still filters sensibly.
+function customRange(from, to) {
+  const start = from || "0000-01-01";
+  const end = to || "9999-12-31";
+  let label;
+  if (from && to) label = formatDateRange(from, to);
+  else if (from) label = "From " + formatDateRange(from, from);
+  else if (to) label = "Up to " + formatDateRange(to, to);
+  else label = "All dates";
+  return { start, end, label };
+}
+function defaultCustomRange() {
+  return { from: isoOf(addDays(new Date(), -29)), to: todayISO() };
+}
+function CustomRangePicker({ from, to, onChange }) {
+  const set = (patch) => {
+    let next = { from, to, ...patch };
+    // Keep the range valid: dragging one end past the other pulls the other along.
+    if (next.from && next.to && next.from > next.to) {
+      if (patch.from !== undefined) next.to = next.from; else next.from = next.to;
+    }
+    onChange(next);
+  };
+  const preset = (days) => onChange({ from: isoOf(addDays(new Date(), -(days - 1))), to: todayISO() });
+  const dayCount = from && to ? Math.round((parseLocal(to) - parseLocal(from)) / 86400000) + 1 : null;
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <div>
+          <FieldLabel>From</FieldLabel>
+          <input type="date" value={from} max={to || undefined} onChange={(e) => set({ from: e.target.value })} style={{ width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div>
+          <FieldLabel>To</FieldLabel>
+          <input type="date" value={to} min={from || undefined} onChange={(e) => set({ to: e.target.value })} style={{ width: "100%", boxSizing: "border-box" }} />
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        {[[7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"]].map(([d, label]) => (
+          <button key={d} type="button" onClick={() => preset(d)} style={{
+            padding: "4px 10px", borderRadius: 999, border: "1px solid " + COLORS.border, background: COLORS.card,
+            color: COLORS.muted, fontSize: 11.5, fontWeight: 700, cursor: "pointer"
+          }}>{label}</button>
+        ))}
+        {dayCount != null && <span style={{ fontSize: 11, color: COLORS.mutedLight, marginLeft: "auto" }}>{dayCount} day{dayCount === 1 ? "" : "s"}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulkAdd, preset, categories, accounts, quickAdds, onAddCategory }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [periodType, setPeriodType] = useState("all");
   const [anchor, setAnchor] = useState(new Date());
+  const [customFrom, setCustomFrom] = useState(() => defaultCustomRange().from);
+  const [customTo, setCustomTo] = useState(() => defaultCustomRange().to);
   const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
   const [acctFilter, setAcctFilter] = useState("all");
@@ -2718,10 +2841,10 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preset && preset.token]);
 
-  useEffect(() => { setPage(1); }, [periodType, typeFilter, catFilter, acctFilter, anchor, showAdjustments]);
+  useEffect(() => { setPage(1); }, [periodType, typeFilter, catFilter, acctFilter, anchor, showAdjustments, customFrom, customTo]);
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
-  const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
+  const range = periodType === "all" ? null : periodType === "custom" ? customRange(customFrom, customTo) : periodRange(rangeKey, anchor);
 
   const allCats = [...new Set([...categories.expense, ...categories.income])];
   const allParents = [...new Set([...((catGroups && catGroups.expense.parents) || []), ...((catGroups && catGroups.income.parents) || [])])];
@@ -2745,7 +2868,7 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
       .filter(matchesAccount)
       .filter((e) => showAdjustments || !e.adjustment)
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt)
-  ), [entries, periodType, range, typeFilter, catFilter, acctFilter, showAdjustments, catGroups]);
+  ), [entries, periodType, range && range.start, range && range.end, typeFilter, catFilter, acctFilter, showAdjustments, catGroups]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, totalPages);
@@ -2762,7 +2885,7 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
     return [...map.entries()];
   }, [pageItems]);
 
-  const isCurrentPeriod = periodType === "all" ? true
+  const isCurrentPeriod = periodType === "all" || periodType === "custom" ? true
     : periodType === "day" ? isoOf(anchor) === todayISO()
     : periodType === "week" ? isoOf(getMonday(anchor)) === isoOf(getMonday(new Date()))
     : anchor.getFullYear() === new Date().getFullYear() && anchor.getMonth() === new Date().getMonth();
@@ -2806,7 +2929,7 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
         <div className="nav-dropdown" style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 14, padding: 14, marginBottom: 14 }}>
           <FieldLabel>Period</FieldLabel>
           <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 12 : 10 }}>
-            {[["all", "All Time"], ["day", "Day"], ["week", "Week"], ["month", "Month"]].map(([id, label]) => (
+            {[["all", "All Time"], ["day", "Day"], ["week", "Week"], ["month", "Month"], ["custom", "Custom"]].map(([id, label]) => (
               <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
                 flex: 1, padding: "8px 6px", borderRadius: 9, border: "1px solid " + (periodType === id ? COLORS.orange : COLORS.border),
                 background: periodType === id ? COLORS.orangeLight : COLORS.card, color: periodType === id ? COLORS.orangeDark : COLORS.muted,
@@ -2814,7 +2937,12 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
               }}>{label}</button>
             ))}
           </div>
-          {periodType !== "all" && (
+          {periodType === "custom" && (
+            <div style={{ marginBottom: 14 }}>
+              <CustomRangePicker from={customFrom} to={customTo} onChange={(r) => { setCustomFrom(r.from); setCustomTo(r.to); }} />
+            </div>
+          )}
+          {periodType !== "all" && periodType !== "custom" && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
               <button onClick={() => setAnchor((a) => shiftAnchor(rangeKey, a, -1))} style={navBtnStyle} aria-label="Previous"><ChevronLeft size={15} /></button>
               <div style={{ textAlign: "center" }}>
@@ -2998,9 +3126,11 @@ function Insights({ entries, accounts, groups }) {
   const [chartView, setChartView] = useState("flow");
   const [catView, setCatView] = useState("group");
   const [drillOpen, setDrillOpen] = useState({});
+  const [customFrom, setCustomFrom] = useState(() => defaultCustomRange().from);
+  const [customTo, setCustomTo] = useState(() => defaultCustomRange().to);
 
   const rangeKey = periodType === "day" ? "daily" : periodType === "week" ? "weekly" : "monthly";
-  const range = periodType !== "all" ? periodRange(rangeKey, anchor) : null;
+  const range = periodType === "all" ? null : periodType === "custom" ? customRange(customFrom, customTo) : periodRange(rangeKey, anchor);
 
   const accountColorMap = useMemo(() => {
     const map = {};
@@ -3020,11 +3150,12 @@ function Insights({ entries, accounts, groups }) {
   const scopedExpenses = useMemo(() => scopedAll.filter((e) => e.type === "expense"), [scopedAll]);
   const scopedByType = useMemo(() => scopedAll.filter((e) => e.type === breakdownType), [scopedAll, breakdownType]);
 
+  const breakdownKeyOf = (e) => (groupBy === "account" ? accountNameFor(e.accountId)
+    : (catView === "group" ? (parentOf(groups, e.type, e.category) || e.category) : e.category));
   const pieData = useMemo(() => {
     const map = {};
     scopedByType.forEach((e) => {
-      const key = groupBy === "account" ? accountNameFor(e.accountId)
-        : (catView === "group" ? (parentOf(groups, e.type, e.category) || e.category) : e.category);
+      const key = breakdownKeyOf(e);
       map[key] = (map[key] || 0) + e.amount;
     });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
@@ -3036,22 +3167,42 @@ function Insights({ entries, accounts, groups }) {
     scopedByType.forEach((e) => { if (parentOf(groups, breakdownType, e.category) === parent) m[e.category] = (m[e.category] || 0) + e.amount; });
     return Object.entries(m).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   };
+  // The exact transactions that add up to one row of the breakdown.
+  const transactionsFor = (name) => scopedByType
+    .filter((e) => breakdownKeyOf(e) === name)
+    .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
   const breakdownTotal = pieData.reduce((s, d) => s + d.value, 0);
 
   const expenseTotal = useMemo(() => scopedExpenses.reduce((s, e) => s + e.amount, 0), [scopedExpenses]);
   const incomeTotal = useMemo(() => scopedAll.filter((e) => e.type === "income").reduce((s, e) => s + e.amount, 0), [scopedAll]);
 
   const trend = useMemo(() => {
+    if (periodType === "custom" && customFrom && customTo) {
+      // Bucket the chosen range by day / week / month depending on its length;
+      // scopedAll is already clipped to the range so edge buckets stay accurate.
+      const from = parseLocal(customFrom), to = parseLocal(customTo);
+      const n = Math.round((to - from) / 86400000) + 1;
+      if (n <= 31) return buildTrend(scopedAll, "daily", to, n);
+      if (n <= 140) {
+        const weeks = Math.round((getMonday(to) - getMonday(from)) / (7 * 86400000)) + 1;
+        return buildTrend(scopedAll, "weekly", to, weeks);
+      }
+      const months = Math.min(24, (to.getFullYear() - from.getFullYear()) * 12 + to.getMonth() - from.getMonth() + 1);
+      return buildTrend(scopedAll, "monthly", to, months);
+    }
     if (periodType === "day") return buildTrend(entries, "daily", anchor, 14);
     if (periodType === "week") return buildTrend(entries, "weekly", anchor, 8);
     if (periodType === "month") return buildTrend(entries, "monthly", anchor, 6);
     return buildTrend(entries, "monthly", new Date(), 12);
-  }, [entries, periodType, anchor]);
+  }, [entries, scopedAll, periodType, anchor, customFrom, customTo]);
 
-  const trendSpan = periodType === "day" ? "14-Day" : periodType === "week" ? "8-Week" : periodType === "month" ? "6-Month" : "12-Month";
+  const trendSpan = periodType === "custom" ? "Custom-Range" : periodType === "day" ? "14-Day" : periodType === "week" ? "8-Week" : periodType === "month" ? "6-Month" : "12-Month";
   const trendTitle = `${trendSpan} ${chartView === "income" ? "Income" : chartView === "expense" ? "Expense" : "Cash Flow"}`;
 
   const daysInScope = useMemo(() => {
+    if (periodType === "custom") {
+      return customFrom && customTo ? Math.max(1, Math.round((parseLocal(customTo) - parseLocal(customFrom)) / 86400000) + 1) : 1;
+    }
     if (periodType === "day") return 1;
     if (periodType === "week") return 7;
     if (periodType === "month") {
@@ -3061,7 +3212,7 @@ function Insights({ entries, accounts, groups }) {
     if (!scopedAll.length) return 1;
     const dates = scopedAll.map((e) => parseLocal(e.date).getTime());
     return Math.max(1, Math.round((Math.max(...dates) - Math.min(...dates)) / 86400000) + 1);
-  }, [periodType, anchor, scopedAll]);
+  }, [periodType, anchor, scopedAll, customFrom, customTo]);
 
   const avgPerDay = breakdownTotal / daysInScope;
   const biggestItem = useMemo(() => [...scopedByType].sort((a, b) => b.amount - a.amount)[0] || null, [scopedByType]);
@@ -3072,9 +3223,16 @@ function Insights({ entries, accounts, groups }) {
     return WEEKDAY_LABELS.map((label, i) => ({ label: label.slice(0, 3), value: sums[i] }));
   }, [scopedExpenses]);
 
-  const prevRange = useMemo(() => (
-    periodType === "all" ? null : periodRange(rangeKey, shiftAnchor(rangeKey, anchor, -1))
-  ), [periodType, rangeKey, anchor]);
+  const prevRange = useMemo(() => {
+    if (periodType === "all") return null;
+    if (periodType === "custom") {
+      // The window of equal length immediately before the chosen dates.
+      if (!customFrom || !customTo) return null;
+      const n = Math.round((parseLocal(customTo) - parseLocal(customFrom)) / 86400000) + 1;
+      return { start: isoOf(addDays(parseLocal(customFrom), -n)), end: isoOf(addDays(parseLocal(customFrom), -1)) };
+    }
+    return periodRange(rangeKey, shiftAnchor(rangeKey, anchor, -1));
+  }, [periodType, rangeKey, anchor, customFrom, customTo]);
 
   const prevTotals = useMemo(() => {
     if (!prevRange) return null;
@@ -3084,7 +3242,7 @@ function Insights({ entries, accounts, groups }) {
     return { income, expense, net: income - expense };
   }, [entries, prevRange]);
 
-  const isCurrentPeriod = periodType === "all" ? true
+  const isCurrentPeriod = periodType === "all" || periodType === "custom" ? true
     : periodType === "day" ? isoOf(anchor) === todayISO()
     : periodType === "week" ? isoOf(getMonday(anchor)) === isoOf(getMonday(new Date()))
     : anchor.getFullYear() === new Date().getFullYear() && anchor.getMonth() === new Date().getMonth();
@@ -3093,7 +3251,7 @@ function Insights({ entries, accounts, groups }) {
     <div>
       <SectionCard title="View By">
         <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 0 : 16 }}>
-          {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["all", "All Time"]].map(([id, label]) => (
+          {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["custom", "Custom"], ["all", "All Time"]].map(([id, label]) => (
             <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
               flex: 1, padding: "9px 8px", borderRadius: 10, border: "1px solid " + (periodType === id ? COLORS.orange : COLORS.border),
               background: periodType === id ? COLORS.orangeLight : COLORS.card, color: periodType === id ? COLORS.orangeDark : COLORS.muted,
@@ -3101,7 +3259,10 @@ function Insights({ entries, accounts, groups }) {
             }}>{label}</button>
           ))}
         </div>
-        {periodType !== "all" && (
+        {periodType === "custom" && (
+          <CustomRangePicker from={customFrom} to={customTo} onChange={(r) => { setCustomFrom(r.from); setCustomTo(r.to); }} />
+        )}
+        {periodType !== "all" && periodType !== "custom" && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <button onClick={() => setAnchor((a) => shiftAnchor(rangeKey, a, -1))} style={navBtnStyle} aria-label="Previous"><ChevronLeft size={16} /></button>
             <div style={{ textAlign: "center" }}>
@@ -3218,13 +3379,16 @@ function Insights({ entries, accounts, groups }) {
               {pieData.slice(0, 6).map((d) => {
                 const pct = breakdownTotal > 0 ? (d.value / breakdownTotal) * 100 : 0;
                 const drillable = groupBy === "category" && catView === "group" && isParentName(groups, breakdownType, d.name);
-                const isOpen = drillable && !!drillOpen[d.name];
+                const rowKey = `${breakdownType}|${groupBy}|${catView}|${d.name}`;
+                const isOpen = !!drillOpen[rowKey];
+                const rowTx = isOpen ? transactionsFor(d.name) : [];
                 return (
                   <div key={d.name} style={{ marginBottom: 10 }}>
-                    <div onClick={drillable ? () => setDrillOpen((o) => ({ ...o, [d.name]: !o[d.name] })) : undefined}
-                      style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4, cursor: drillable ? "pointer" : "default" }}>
+                    <div onClick={() => setDrillOpen((o) => ({ ...o, [rowKey]: !o[rowKey] }))}
+                      role="button" aria-expanded={isOpen}
+                      style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4, cursor: "pointer" }}>
                       <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
-                        {drillable && <ChevronDown size={12} style={{ color: COLORS.muted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />}
+                        <ChevronDown size={12} style={{ color: COLORS.muted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
                         <span style={{ width: 8, height: 8, borderRadius: 2, background: colorFor(d.name) }} />{d.name}
                       </span>
                       <span className="mono" style={{ color: COLORS.muted }}>{fmt(d.value)} · {pct.toFixed(0)}%</span>
@@ -3232,7 +3396,7 @@ function Insights({ entries, accounts, groups }) {
                     <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
                       <div style={{ height: "100%", width: `${pct}%`, background: colorFor(d.name), borderRadius: 4 }} />
                     </div>
-                    {isOpen && (
+                    {isOpen && drillable && (
                       <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: "4px 10px" }}>
                         {childBreakdown(d.name).map((ch, i, arr) => (
                           <div key={ch.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < arr.length - 1 ? "1px solid " + COLORS.border : "none" }}>
@@ -3240,6 +3404,26 @@ function Insights({ entries, accounts, groups }) {
                               <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(ch.name) }} />{ch.name}
                             </span>
                             <span className="mono">{fmt(ch.value)} · {d.value > 0 ? ((ch.value / d.value) * 100).toFixed(0) : 0}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {isOpen && (
+                      <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: "4px 10px", maxHeight: 260, overflowY: "auto" }}>
+                        <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: COLORS.mutedLight, padding: "6px 0 2px" }}>
+                          {rowTx.length} transaction{rowTx.length === 1 ? "" : "s"}
+                        </div>
+                        {rowTx.map((e, i) => (
+                          <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < rowTx.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                            <span style={{ color: COLORS.muted, display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                              <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(e.category), flexShrink: 0 }} />
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {relDateLabel(e.date)}
+                                {(drillable || groupBy === "account") ? " · " + e.category : ""}
+                                {e.note ? " · " + e.note : ""}
+                              </span>
+                            </span>
+                            <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
                           </div>
                         ))}
                       </div>
@@ -3299,13 +3483,133 @@ function CompareRow({ label, current, previous, higherIsBetter }) {
 
 /* ---------- budgets ---------- */
 
+// Status of one budget/goal. Budgets are about staying under a ceiling
+// (over = bad); income goals are about reaching a target (reached = good).
+function budgetStatus(lim, spent, isGoal) {
+  const pct = lim > 0 ? (spent / lim) * 100 : 0;
+  if (isGoal) return pct >= 100 ? "reached" : pct >= 70 ? "close" : "progress";
+  return spent > lim ? "over" : pct >= 70 ? "near" : "ok";
+}
+function budgetStatusColor(status) {
+  return { over: COLORS.rose, near: COLORS.amber, ok: COLORS.green, reached: COLORS.green, close: COLORS.amber, progress: COLORS.blue }[status];
+}
+const BUDGET_STATUS_LABEL = { over: "Over budget", near: "Near limit", ok: "On track", reached: "Goal reached", close: "Almost there", progress: "In progress" };
+
+function BudgetRing({ pct, color, size = 76, stroke = 8 }) {
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const shown = Math.max(0, Math.min(100, pct));
+  return (
+    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)", display: "block" }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={COLORS.border} strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={circ} strokeDashoffset={circ * (1 - shown / 100)} style={{ transition: "stroke-dashoffset .5s ease" }} />
+      </svg>
+      <div className="mono" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size >= 90 ? 18 : 14, fontWeight: 800 }}>
+        {Math.round(pct)}%
+      </div>
+    </div>
+  );
+}
+
+// One budget (or goal): ring + amounts + date range, with inline edit/remove and
+// an expandable list of the transactions that make up the total. With no limit
+// set it turns into a small "set a limit" prompt (used for master budgets).
+function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel, transactions, onSet, onRemove, emptyHint }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(lim || "");
+  const [showTx, setShowTx] = useState(false);
+  useEffect(() => { setVal(lim || ""); }, [lim]);
+
+  const save = () => {
+    const n = parseFloat(val);
+    if (!n || n <= 0) return;
+    onSet(n);
+    setEditing(false);
+  };
+
+  const hasLimit = lim != null && lim > 0;
+  const status = hasLimit ? budgetStatus(lim, spent, isGoal) : null;
+  const color = status ? budgetStatusColor(status) : COLORS.border;
+  const pct = hasLimit ? (spent / lim) * 100 : 0;
+  const remaining = hasLimit ? lim - spent : 0;
+  const remainText = !hasLimit ? "" : isGoal
+    ? (remaining <= 0 ? `Goal reached · +${fmt(-remaining)} over` : `${fmt(remaining)} to go`)
+    : (remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`);
+  const remainColor = !hasLimit ? COLORS.mutedLight : isGoal ? (remaining <= 0 ? COLORS.green : COLORS.muted) : (remaining < 0 ? COLORS.rose : COLORS.muted);
+  const iconBtn = { background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex", padding: 4 };
+
+  return (
+    <div style={{ background: COLORS.bg, borderRadius: 16, padding: 14, border: "1px solid " + (status === "over" ? withAlpha(COLORS.rose, "55") : COLORS.border) }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <BudgetRing pct={pct} color={color} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+            {dotColor && <span style={{ width: 9, height: 9, borderRadius: 3, background: dotColor, flexShrink: 0 }} />}
+            <span style={{ fontSize: 14, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+          </div>
+          {subtitle && <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</div>}
+          {editing || !hasLimit ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <input type="number" min="0" step="1" placeholder={isGoal ? "RM target" : "RM limit"} value={val} onChange={(e) => setVal(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") save(); }} style={{ width: 96, padding: "5px 8px", fontSize: 12.5, boxSizing: "border-box" }} className="mono" />
+              <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Save</button>
+              {editing && <button onClick={() => { setEditing(false); setVal(lim || ""); }} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "5px 9px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>}
+            </div>
+          ) : (
+            <>
+              <div className="mono" style={{ fontSize: 13, fontWeight: 700 }}>
+                {fmt(spent)} <span style={{ color: COLORS.mutedLight, fontWeight: 600 }}>/ {fmt(lim)}</span>
+              </div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: remainColor, marginTop: 1 }}>{remainText}</div>
+            </>
+          )}
+          {!hasLimit && emptyHint && <div style={{ fontSize: 11, color: COLORS.mutedLight, marginTop: 4 }}>{emptyHint}</div>}
+        </div>
+        {hasLimit && !editing && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, alignSelf: "flex-start" }}>
+            <button onClick={() => setEditing(true)} aria-label="Edit limit" style={iconBtn}><Pencil size={13} /></button>
+            <button onClick={onRemove} aria-label="Remove" style={iconBtn}><Trash2 size={13} /></button>
+          </div>
+        )}
+      </div>
+      {hasLimit && (
+        <>
+          {rangeLabel && <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginTop: 10 }}>{rangeLabel}</div>}
+          <button onClick={() => setShowTx((v) => !v)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
+            {showTx ? "Hide" : "Show"} transactions ({transactions.length})
+            <ChevronDown size={11} style={{ transform: showTx ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+          </button>
+          {showTx && (
+            <div style={{ marginTop: 6, background: COLORS.card, borderRadius: 10, padding: transactions.length ? "4px 10px" : "8px 10px", maxHeight: 220, overflowY: "auto" }}>
+              {transactions.length === 0 ? (
+                <div style={{ fontSize: 11, color: COLORS.mutedLight, padding: "4px 0" }}>No transactions in this period yet.</div>
+              ) : transactions.map((e, i) => (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < transactions.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                  <span style={{ color: COLORS.muted, display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(e.category), flexShrink: 0 }} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)} · {e.category}{e.note ? " · " + e.note : ""}</span>
+                  </span>
+                  <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, masterBudgets, onSetMasterBudget, onRemoveMasterBudget, categories, onAddCategory }) {
   const [budgetType, setBudgetType] = useState("expense");
   const [cat, setCat] = useState(categories.expense[0]);
   const [period, setPeriod] = useState("monthly");
   const [limit, setLimit] = useState("");
-  const [expanded, setExpanded] = useState({});
-  const toggleExpanded = (key) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
+  const [heroPeriod, setHeroPeriod] = useState("monthly");
+  const [viewMode, setViewMode] = useState("status");
+  const [collapsed, setCollapsed] = useState({});
 
   const isIncome = budgetType === "income";
 
@@ -3314,9 +3618,8 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
     setCat((categories[type] || [])[0] || "");
   };
 
-  // Returns the exact date range plus the matching, sorted transactions for
-  // a category's budget period — powers both the progress total and the
-  // expandable "Show transactions" breakdown.
+  // The exact date range plus the matching, sorted transactions for a
+  // category's (or whole group's) budget period.
   const categoryPeriodInfo = (category, periodType) => {
     const range = periodRange(periodType, new Date());
     const scope = categoryScope(groups, budgetType, category);
@@ -3337,7 +3640,6 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
     };
     return { daily: build("daily"), weekly: build("weekly"), monthly: build("monthly") };
   }, [entries, budgetType]);
-  const masterSpent = { daily: masterPeriodInfo.daily.spent, weekly: masterPeriodInfo.weekly.spent, monthly: masterPeriodInfo.monthly.spent };
 
   const submitBudget = () => {
     const val = parseFloat(limit);
@@ -3348,7 +3650,56 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
 
   const groupBudgets = (budgets && budgets[budgetType]) || {};
   const groupMaster = (masterBudgets && masterBudgets[budgetType]) || {};
-  const categoryBudgetEntries = Object.entries(groupBudgets).filter(([, periods]) => Object.keys(periods).length > 0);
+  const hasGroups = !!(groups && groups[budgetType] && groups[budgetType].parents.length > 0);
+
+  // Every category/group budget as a flat list of cards.
+  const items = [];
+  Object.entries(groupBudgets).forEach(([category, periods]) => {
+    BUDGET_PERIODS.filter((pt) => periods[pt] != null).forEach((pt) => {
+      const info = categoryPeriodInfo(category, pt);
+      const isGroupBudget = isParentName(groups, budgetType, category);
+      items.push({
+        key: `${budgetType}::${category}::${pt}`, category, pt, lim: periods[pt], ...info, isGroupBudget,
+        parent: isGroupBudget ? category : parentOf(groups, budgetType, category),
+        status: budgetStatus(periods[pt], info.spent, isIncome),
+      });
+    });
+  });
+
+  // Hero totals for the chosen period. A category budget sitting under a
+  // budgeted group is already inside that group's limit, so it isn't added twice.
+  const heroItems = items.filter((i) => {
+    if (i.pt !== heroPeriod) return false;
+    const par = parentOf(groups, budgetType, i.category);
+    return !(par && groupBudgets[par] && groupBudgets[par][heroPeriod] != null);
+  });
+  const masterLim = groupMaster[heroPeriod];
+  let heroLim = heroItems.reduce((s, i) => s + i.lim, 0);
+  let heroSpent = heroItems.reduce((s, i) => s + i.spent, 0);
+  let heroFromMaster = false;
+  if (heroItems.length === 0 && masterLim) { heroLim = masterLim; heroSpent = masterPeriodInfo[heroPeriod].spent; heroFromMaster = true; }
+  const heroHas = heroLim > 0;
+  const heroStatus = heroHas ? budgetStatus(heroLim, heroSpent, isIncome) : null;
+  const heroColor = heroStatus ? budgetStatusColor(heroStatus) : COLORS.border;
+  const heroPct = heroHas ? (heroSpent / heroLim) * 100 : 0;
+  const statusOrder = isIncome ? ["reached", "close", "progress"] : ["over", "near", "ok"];
+  const statusCounts = statusOrder.map((s) => ({ s, n: heroItems.filter((i) => i.status === s).length }));
+
+  // Sections for the list: by status, or by category group.
+  let sections;
+  if (viewMode === "group" && hasGroups) {
+    const parents = groups[budgetType].parents;
+    sections = parents.map((p) => ({ id: "g:" + p, title: p, color: catColor(p), items: items.filter((i) => i.parent === p) }));
+    sections.push({ id: "g:__none", title: "Ungrouped", color: COLORS.mutedLight, items: items.filter((i) => !i.parent) });
+  } else {
+    sections = statusOrder.map((s) => ({ id: "s:" + s, title: BUDGET_STATUS_LABEL[s], color: budgetStatusColor(s), items: items.filter((i) => i.status === s) }));
+  }
+  sections = sections.filter((s) => s.items.length > 0);
+  const pill = (active, accent, accentLight) => ({
+    padding: "6px 12px", borderRadius: 999, border: "1px solid " + (active ? accent : COLORS.border),
+    background: active ? accentLight : COLORS.card, color: active ? accent : COLORS.muted, fontSize: 11.5, fontWeight: 700, cursor: "pointer"
+  });
+  const cardGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))", gap: 12 };
 
   return (
     <div>
@@ -3362,29 +3713,77 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
         ))}
       </div>
 
+      {/* Summary */}
+      <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} icon={<Target size={13} />} right={
+        <div style={{ display: "flex", gap: 6 }}>
+          {BUDGET_PERIODS.map((pt) => (
+            <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{PERIOD_LABEL[pt]}</button>
+          ))}
+        </div>
+      }>
+        {!heroHas ? (
+          <EmptyNote>No {heroPeriod} {isIncome ? "goals" : "budgets"} set yet. Add one below to see your overview.</EmptyNote>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+            <BudgetRing pct={heroPct} color={heroColor} size={104} stroke={10} />
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontSize: 11, color: COLORS.mutedLight, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                {isIncome ? "Earned" : "Spent"} · {formatDateRange(masterPeriodInfo[heroPeriod].range.start, masterPeriodInfo[heroPeriod].range.end)}
+              </div>
+              <div className="mono" style={{ fontSize: 24, fontWeight: 800, lineHeight: 1.2 }}>
+                {fmt(heroSpent)} <span style={{ fontSize: 14, color: COLORS.mutedLight, fontWeight: 600 }}>of {fmt(heroLim)}</span>
+              </div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2, color: heroStatus === "over" ? COLORS.rose : isIncome && heroSpent >= heroLim ? COLORS.green : COLORS.muted }}>
+                {isIncome
+                  ? (heroSpent >= heroLim ? `Goal reached · +${fmt(heroSpent - heroLim)} over` : `${fmt(heroLim - heroSpent)} to go`)
+                  : (heroSpent > heroLim ? `Over by ${fmt(heroSpent - heroLim)}` : `${fmt(heroLim - heroSpent)} left`)}
+                {heroFromMaster ? " · master " + (isIncome ? "goal" : "budget") : ""}
+              </div>
+              {!heroFromMaster && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  {statusCounts.map(({ s, n }) => (
+                    <span key={s} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, background: withAlpha(budgetStatusColor(s), "1F"), color: budgetStatusColor(s), fontSize: 11.5, fontWeight: 700, opacity: n ? 1 : 0.5 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: budgetStatusColor(s) }} />{n} {BUDGET_STATUS_LABEL[s].toLowerCase()}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      {/* Master budget */}
       <SectionCard title={isIncome ? "Master Income Goal" : "Master Budget"} icon={<Target size={13} />}>
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
           {isIncome
             ? "An overall earnings target across all income categories combined — sits above the per-category goals below."
             : "An overall spending ceiling across all categories combined — sits above the per-category budgets below."}
         </div>
-        {["daily", "weekly", "monthly"].map((pt) => (
-          <MasterBudgetRow
-            key={pt}
-            label={PERIOD_LABEL[pt]}
-            limit={groupMaster[pt]}
-            spent={masterSpent[pt]}
-            isGoal={isIncome}
-            onSet={(val) => onSetMasterBudget(budgetType, pt, val)}
-            onRemove={() => onRemoveMasterBudget(budgetType, pt)}
-            rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
-            transactions={masterPeriodInfo[pt].transactions}
-          />
-        ))}
+        <div style={cardGrid}>
+          {BUDGET_PERIODS.map((pt) => (
+            <BudgetCard
+              key={pt + budgetType}
+              title={PERIOD_LABEL[pt]}
+              dotColor={COLORS.orange}
+              lim={groupMaster[pt]}
+              spent={masterPeriodInfo[pt].spent}
+              isGoal={isIncome}
+              rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
+              transactions={masterPeriodInfo[pt].transactions}
+              onSet={(val) => onSetMasterBudget(budgetType, pt, val)}
+              onRemove={() => onRemoveMasterBudget(budgetType, pt)}
+              emptyHint={`No ${PERIOD_LABEL[pt].toLowerCase()} ${isIncome ? "goal" : "ceiling"} set.`}
+            />
+          ))}
+        </div>
       </SectionCard>
 
       <div style={{ height: 16 }} />
 
+      {/* Add form */}
       <SectionCard title={isIncome ? "Set an Income Goal" : "Set a Category Budget"}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
           <div>
@@ -3412,146 +3811,51 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title={isIncome ? "Income Goals" : "Category Budgets"}>
-        {categoryBudgetEntries.length === 0 && <EmptyNote>{isIncome ? "No income goals set yet. Add one above." : "No category budgets set yet. Add one above."}</EmptyNote>}
-        {categoryBudgetEntries.map(([category, periods], idx) => (
-          <div key={category} style={{ marginBottom: 16, paddingBottom: 14, borderBottom: idx === categoryBudgetEntries.length - 1 ? "none" : "1px solid " + COLORS.border }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-              <span style={{ width: 9, height: 9, borderRadius: 3, background: catColor(category) }} />
-              <span style={{ fontWeight: 700, fontSize: 13.5 }}>{category}</span>
-              {isParentName(groups, budgetType, category) && (
-                <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600 }}>Group · {childrenOf(groups, budgetType, category).join(", ") || "no categories yet"}</span>
-              )}
-              {parentOf(groups, budgetType, category) && (
-                <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600 }}>in {parentOf(groups, budgetType, category)}</span>
+      {/* List */}
+      <SectionCard title={isIncome ? "Income Goals" : "Category Budgets"} right={hasGroups && items.length > 0 && (
+        <div style={{ display: "flex", gap: 6 }}>
+          {[["status", "By status"], ["group", "By group"]].map(([id, label]) => (
+            <button key={id} onClick={() => setViewMode(id)} style={pill(viewMode === id, COLORS.blue, COLORS.blueLight)}>{label}</button>
+          ))}
+        </div>
+      )}>
+        {items.length === 0 && <EmptyNote>{isIncome ? "No income goals set yet. Add one above." : "No category budgets set yet. Add one above."}</EmptyNote>}
+        {sections.map((sec, si) => {
+          const isCollapsed = !!collapsed[sec.id];
+          return (
+            <div key={sec.id} style={{ marginBottom: si === sections.length - 1 ? 0 : 18 }}>
+              <button onClick={() => setCollapsed((c) => ({ ...c, [sec.id]: !c[sec.id] }))} style={{
+                display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "none", cursor: "pointer",
+                padding: "2px 0 10px", color: COLORS.text, textAlign: "left"
+              }}>
+                <span style={{ width: 9, height: 9, borderRadius: 3, background: sec.color, flexShrink: 0 }} />
+                <span style={{ fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{sec.title}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.mutedLight }}>{sec.items.length}</span>
+                <ChevronDown size={14} style={{ marginLeft: "auto", color: COLORS.muted, transform: isCollapsed ? "none" : "rotate(180deg)", transition: "transform .15s" }} />
+              </button>
+              {!isCollapsed && (
+                <div style={cardGrid}>
+                  {sec.items.map((i) => (
+                    <BudgetCard
+                      key={i.key}
+                      title={i.category}
+                      subtitle={`${PERIOD_LABEL[i.pt]}${i.isGroupBudget ? " · whole group" : (viewMode === "status" && i.parent ? " · in " + i.parent : "")}`}
+                      dotColor={catColor(i.category)}
+                      lim={i.lim}
+                      spent={i.spent}
+                      isGoal={isIncome}
+                      rangeLabel={formatDateRange(i.range.start, i.range.end)}
+                      transactions={i.transactions}
+                      onSet={(val) => onSetBudget(budgetType, i.category, i.pt, val)}
+                      onRemove={() => onRemoveBudget(budgetType, i.category, i.pt)}
+                    />
+                  ))}
+                </div>
               )}
             </div>
-            {["daily", "weekly", "monthly"].filter((pt) => periods[pt] != null).map((pt) => {
-              const lim = periods[pt];
-              const { range, transactions, spent } = categoryPeriodInfo(category, pt);
-              const pct = Math.min(100, (spent / lim) * 100);
-              const over = spent > lim;
-              const color = isIncome
-                ? (spent >= lim ? COLORS.green : pct >= 70 ? COLORS.amber : COLORS.blue)
-                : (over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green);
-              const key = `${budgetType}::${category}::${pt}`;
-              const isOpen = !!expanded[key];
-              return (
-                <div key={pt} style={{ marginBottom: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
-                    <span style={{ color: COLORS.muted, fontWeight: 600 }}>{PERIOD_LABEL[pt]}</span>
-                    <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                      <span className="mono" style={{ color: !isIncome && over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(lim)}</span>
-                      <button onClick={() => onRemoveBudget(budgetType, category, pt)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginBottom: 4 }}>{formatDateRange(range.start, range.end)}</div>
-                  <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
-                  </div>
-                  {isIncome
-                    ? (spent >= lim
-                        ? <div style={{ fontSize: 10.5, color: COLORS.green, marginTop: 3, fontWeight: 600 }}>Goal reached · +{fmt(spent - lim)} over</div>
-                        : <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginTop: 3, fontWeight: 600 }}>{fmt(lim - spent)} to go</div>)
-                    : (over && <div style={{ fontSize: 10.5, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - lim)}</div>)}
-                  <button onClick={() => toggleExpanded(key)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
-                    {isOpen ? "Hide" : "Show"} transactions ({transactions.length})
-                    <ChevronDown size={11} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-                  </button>
-                  {isOpen && (
-                    <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: transactions.length ? "4px 10px" : "8px 10px" }}>
-                      {transactions.length === 0 ? (
-                        <div style={{ fontSize: 11, color: COLORS.mutedLight, padding: "4px 0" }}>No transactions in this period yet.</div>
-                      ) : transactions.map((e, i) => (
-                        <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < transactions.length - 1 ? "1px solid " + COLORS.border : "none" }}>
-                          <span style={{ color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)}{e.note ? " · " + e.note : ""}</span>
-                          <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ))}
+          );
+        })}
       </SectionCard>
-    </div>
-  );
-}
-
-function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, transactions, isGoal }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(limit || "");
-  const [showTx, setShowTx] = useState(false);
-
-  useEffect(() => { setVal(limit || ""); }, [limit]);
-
-  const save = () => {
-    const n = parseFloat(val);
-    if (!n || n <= 0) return;
-    onSet(n);
-    setEditing(false);
-  };
-
-  const pct = limit ? Math.min(100, (spent / limit) * 100) : 0;
-  const over = limit && spent > limit;
-  const color = isGoal
-    ? (limit && spent >= limit ? COLORS.green : pct >= 70 ? COLORS.amber : COLORS.blue)
-    : (over ? COLORS.rose : pct >= 70 ? COLORS.amber : COLORS.green);
-
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>{label}</div>
-        {!editing && limit ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="mono" style={{ fontSize: 12, color: !isGoal && over ? COLORS.rose : COLORS.muted }}>{fmt(spent)} / {fmt(limit)}</span>
-            <button onClick={() => setEditing(true)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 11, cursor: "pointer", fontWeight: 700 }}>Edit</button>
-            <button onClick={onRemove} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <input type="number" min="0" step="1" placeholder={isGoal ? "RM target" : "RM limit"} value={val} onChange={(e) => setVal(e.target.value)}
-              style={{ width: 100, padding: "5px 8px", fontSize: 12.5 }} className="mono" />
-            <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Save</button>
-          </div>
-        )}
-      </div>
-      {rangeLabel && <div style={{ fontSize: 10.5, color: COLORS.mutedLight, marginBottom: 6 }}>{rangeLabel}</div>}
-      {limit ? (
-        <>
-          <div style={{ height: 7, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4 }} />
-          </div>
-          {isGoal
-            ? (spent >= limit
-                ? <div style={{ fontSize: 11, color: COLORS.green, marginTop: 3, fontWeight: 600 }}>Goal reached · +{fmt(spent - limit)} over</div>
-                : <div style={{ fontSize: 11, color: COLORS.mutedLight, marginTop: 3, fontWeight: 600 }}>{fmt(limit - spent)} to go</div>)
-            : (over && <div style={{ fontSize: 11, color: COLORS.rose, marginTop: 3, fontWeight: 600 }}>Over by {fmt(spent - limit)}</div>)}
-          <button onClick={() => setShowTx((v) => !v)} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "6px 0 0", display: "flex", alignItems: "center", gap: 3 }}>
-            {showTx ? "Hide" : "Show"} transactions ({transactions.length})
-            <ChevronDown size={11} style={{ transform: showTx ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-          </button>
-          {showTx && (
-            <div style={{ marginTop: 6, background: COLORS.bg, borderRadius: 10, padding: transactions.length ? "4px 10px" : "8px 10px" }}>
-              {transactions.length === 0 ? (
-                <div style={{ fontSize: 11, color: COLORS.mutedLight, padding: "4px 0" }}>No transactions in this period yet.</div>
-              ) : transactions.map((e, i) => (
-                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < transactions.length - 1 ? "1px solid " + COLORS.border : "none" }}>
-                  <span style={{ color: COLORS.muted, display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
-                    <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(e.category), flexShrink: 0 }} />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)} · {e.category}{e.note ? " · " + e.note : ""}</span>
-                  </span>
-                  <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      ) : (
-        <div style={{ fontSize: 11.5, color: COLORS.mutedLight }}>No {label.toLowerCase()} {isGoal ? "goal" : "ceiling"} set.</div>
-      )}
     </div>
   );
 }
@@ -3559,7 +3863,7 @@ function MasterBudgetRow({ label, limit, spent, onSet, onRemove, rangeLabel, tra
 /* ---------- recurring ---------- */
 
 function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, categories, onAddCategory, accounts }) {
-  const [form, setForm] = useState({ name: "", amount: "", type: "expense", category: categories.expense[0], categoryLabel: "", frequency: "monthly", day: 1, accountId: "" });
+  const [form, setForm] = useState({ name: "", amount: "", type: "expense", category: categories.expense[0], categoryLabel: "", frequency: "monthly", day: 1, accountId: "", endDate: "" });
   const [error, setError] = useState("");
 
   const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : categories.income[0], categoryLabel: "" }));
@@ -3570,13 +3874,15 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
     if (!form.name.trim()) { setError("Give it a name, e.g. Netflix."); return; }
     if (!amount || amount <= 0) { setError("Enter an amount greater than zero."); return; }
     if (form.frequency === "monthly" && (!form.day || form.day < 1 || form.day > 31)) { setError("Day must be between 1 and 31."); return; }
+    if (form.endDate && form.endDate < todayISO()) { setError("The end date can't be in the past."); return; }
     setError("");
     onAdd({
       name: form.name.trim(), amount, type: form.type, category: form.category,
       categoryLabel: form.category === "Other" ? form.categoryLabel.trim() : "",
-      frequency: form.frequency, day: parseInt(form.day), active: true, accountId: form.accountId || null
+      frequency: form.frequency, day: parseInt(form.day), active: true, accountId: form.accountId || null,
+      endDate: form.endDate || null
     });
-    setForm((f) => ({ ...f, name: "", amount: "", categoryLabel: "" }));
+    setForm((f) => ({ ...f, name: "", amount: "", categoryLabel: "", endDate: "" }));
   };
 
   return (
@@ -3635,6 +3941,18 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
             <AccountSelect value={form.accountId} onChange={(id) => setForm((f) => ({ ...f, accountId: id }))} accounts={accounts} allowUnassigned />
           </div>
         )}
+        <div style={{ marginBottom: 10 }}>
+          <FieldLabel>Ends on (optional)</FieldLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="date" value={form.endDate} min={todayISO()} onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value }))} style={{ flex: 1, minWidth: 0, boxSizing: "border-box" }} />
+            {form.endDate && (
+              <button type="button" onClick={() => setForm((f) => ({ ...f, endDate: "" }))} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "7px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>No end</button>
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.mutedLight, marginTop: 4 }}>
+            {form.endDate ? "The last charge is on or before this date; nothing is logged after it." : "Leave blank to keep it going until you pause or delete it — good for subscriptions, or set a date for instalments and fixed-term plans."}
+          </div>
+        </div>
         {error && <div style={{ color: COLORS.rose, fontSize: 12.5, marginBottom: 10, fontWeight: 600 }}>{error}</div>}
         <button onClick={submit} style={{
           display: "flex", alignItems: "center", gap: 6, background: COLORS.orange, color: "#fff",
@@ -3661,10 +3979,10 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
 
 function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categories, onAddCategory, accounts }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "" });
+  const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "", endDate: r.endDate || "" });
 
   useEffect(() => {
-    setForm({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "" });
+    setForm({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "", endDate: r.endDate || "" });
   }, [r]);
 
   const switchType = (type) => setForm((f) => ({ ...f, type, category: type === "expense" ? categories.expense[0] : categories.income[0], categoryLabel: "" }));
@@ -3675,7 +3993,8 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
     onUpdate(r.id, {
       name: form.name.trim(), amount, type: form.type, category: form.category,
       categoryLabel: form.category === "Other" ? form.categoryLabel.trim() : "",
-      frequency: form.frequency, day: parseInt(form.day), accountId: form.accountId || null
+      frequency: form.frequency, day: parseInt(form.day), accountId: form.accountId || null,
+      endDate: form.endDate || null
     });
     setEditing(false);
   };
@@ -3716,6 +4035,13 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
         {accounts.length > 0 && (
           <AccountSelect value={form.accountId} onChange={(id) => setForm((f) => ({ ...f, accountId: id }))} accounts={accounts} allowUnassigned compact />
         )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0" }}>
+          <span style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 600, whiteSpace: "nowrap" }}>Ends on</span>
+          <input type="date" value={form.endDate} onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value }))} style={{ flex: 1, minWidth: 0, fontSize: 13, boxSizing: "border-box" }} />
+          {form.endDate && (
+            <button type="button" onClick={() => setForm((f) => ({ ...f, endDate: "" }))} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>No end</button>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Save</button>
           <button onClick={() => setEditing(false)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>Cancel</button>
@@ -3730,19 +4056,21 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
   const linkedAccount = r.accountId ? accounts.find((a) => a.id === r.accountId) : null;
   const periodKey = freq === "weekly" ? isoOf(getMonday(new Date())) : thisMonthKey();
   const alreadyRun = r.lastRun === periodKey;
-  const runDisabled = !r.active || alreadyRun;
-  const runTitle = !r.active ? "Resume it first to log early" : alreadyRun ? "Already logged this period" : "Log it today, ahead of its due date";
+  const ended = isRecurringEnded(r);
+  const runDisabled = !r.active || alreadyRun || ended;
+  const runTitle = ended ? "This recurring item has ended" : !r.active ? "Resume it first to log early" : alreadyRun ? "Already logged this period" : "Log it today, ahead of its due date";
+  const endText = r.endDate ? (ended ? ` · Ended ${formatDateRange(r.endDate, r.endDate)}` : ` · Ends ${formatDateRange(r.endDate, r.endDate)}`) : "";
 
   return (
     <div style={{
       display: "grid", gridTemplateColumns: "1fr auto auto auto auto auto", alignItems: "center", gap: 8,
-      padding: "11px 4px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border, opacity: r.active ? 1 : 0.45
+      padding: "11px 4px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border, opacity: r.active && !ended ? 1 : 0.45
     }}>
       <div>
         <div style={{ fontSize: 13.5, fontWeight: 700 }}>{r.name}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1, flexWrap: "wrap" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(r.category) }} />
-          <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}{linkedAccount ? ` · ${linkedAccount.name}` : ""}</span>
+          <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}{linkedAccount ? ` · ${linkedAccount.name}` : ""}{endText}</span>
         </div>
       </div>
       <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: r.type === "income" ? COLORS.green : COLORS.text }}>
@@ -4070,7 +4398,7 @@ function AccentColorPicker({ value, onChange }) {
   );
 }
 
-function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, groupApi, onResetAll }) {
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, groupApi, accountTypeApi, accounts, onResetAll }) {
   const [name, setName] = useState(profile.name);
 
   useEffect(() => { setName(profile.name); }, [profile.name]);
@@ -4160,6 +4488,10 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
       <div style={{ height: 16 }} />
 
       <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} groupApi={groupApi} />
+
+      <div style={{ height: 16 }} />
+
+      <AccountTypesManager api={accountTypeApi} accounts={accounts} />
 
       <div style={{ height: 16 }} />
 
@@ -4491,7 +4823,7 @@ function SectionCard({ title, icon, right, children }) {
 // a tinted circle matching its color) and label, and the open panel lists
 // every item the same way. Backs both AccountSelect (below) and the account
 // "Type" picker. `items` is [{ id, label, Icon, color }].
-function IconPillSelect({ value, onChange, items, compact }) {
+function IconPillSelect({ value, onChange, items, compact, footer }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
@@ -4557,6 +4889,7 @@ function IconPillSelect({ value, onChange, items, compact }) {
               );
             })}
           </div>
+          {footer && footer({ close: () => setOpen(false) })}
         </div>
       )}
     </div>
@@ -4568,7 +4901,7 @@ function IconPillSelect({ value, onChange, items, compact }) {
 // blank "Unassigned" option (value ""); pass `compact` for tight spaces.
 function AccountSelect({ value, onChange, accounts, allowUnassigned, compact }) {
   const items = accounts.map((a) => {
-    const t = ACCOUNT_TYPES.find((t) => t.id === a.type) || ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
+    const t = accountTypeInfo(a.type);
     return { id: a.id, label: a.name, Icon: t.icon, color: t.color };
   });
   const withUnassigned = allowUnassigned ? [{ id: "", label: "Unassigned", Icon: X, color: COLORS.mutedLight }, ...items] : items;
@@ -4577,9 +4910,138 @@ function AccountSelect({ value, onChange, accounts, allowUnassigned, compact }) 
 
 // Account "Type" picker (Bank, E-Wallet, Cash, …) — same pill style, backed
 // by the fixed ACCOUNT_TYPES list rather than the user's own accounts.
-function AccountTypeSelect({ value, onChange, compact }) {
-  const items = ACCOUNT_TYPES.map((t) => ({ id: t.id, label: t.label, Icon: t.icon, color: t.color }));
-  return <IconPillSelect value={value} onChange={onChange} items={items} compact={compact} />;
+function AccountTypeSelect({ value, onChange, compact, api }) {
+  const items = getAccountTypes().map((t) => ({ id: t.id, label: t.label, Icon: t.icon, color: t.color }));
+  const footer = api ? ({ close }) => <AccountTypeAdder api={api} onCreated={(id) => { onChange(id); close(); }} /> : null;
+  return <IconPillSelect value={value} onChange={onChange} items={items} compact={compact} footer={footer} />;
+}
+
+// Small form for creating a custom account type: name, icon and colour.
+function AccountTypeAdder({ api, onCreated, alwaysOpen }) {
+  const [open, setOpen] = useState(!!alwaysOpen);
+  const [name, setName] = useState("");
+  const [icon, setIcon] = useState("star");
+  const [color, setColor] = useState(CATEGORY_COLOR_PRESETS[2]);
+  const [error, setError] = useState("");
+  const reset = () => { setName(""); setIcon("star"); setColor(CATEGORY_COLOR_PRESETS[2]); setError(""); if (!alwaysOpen) setOpen(false); };
+  const submit = () => {
+    const res = api.onAdd(name, icon, color);
+    if (!res.ok) { setError(res.error); return; }
+    if (onCreated) onCreated(res.id);
+    reset();
+  };
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} style={{
+        marginTop: 8, width: "100%", background: "none", border: "1px dashed " + COLORS.border, borderRadius: 999,
+        padding: "6px 11px", fontSize: 12, fontWeight: 700, color: COLORS.muted, cursor: "pointer"
+      }}>+ Add new account type</button>
+    );
+  }
+  const Preview = ACCOUNT_ICON_OPTIONS[icon];
+  return (
+    <div style={{ marginTop: 8, padding: 10, border: "1px solid " + COLORS.border, borderRadius: 12, background: COLORS.bg }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ width: 28, height: 28, borderRadius: "50%", background: withAlpha(color, "22"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Preview size={14} color={color} />
+        </span>
+        <input autoFocus placeholder="Type name, e.g. Investments" value={name} onChange={(e) => { setName(e.target.value); setError(""); }}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); }} style={{ flex: 1, minWidth: 0, fontSize: 12.5 }} />
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+        {Object.entries(ACCOUNT_ICON_OPTIONS).map(([key, Ico]) => (
+          <button key={key} type="button" onClick={() => setIcon(key)} aria-label={key} style={{
+            width: 28, height: 28, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+            border: "1px solid " + (icon === key ? color : COLORS.border), background: icon === key ? withAlpha(color, "22") : COLORS.card
+          }}><Ico size={13} color={icon === key ? color : COLORS.muted} /></button>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+        {CATEGORY_COLOR_PRESETS.map((h) => (
+          <button key={h} type="button" onClick={() => setColor(h)} aria-label={h} style={{
+            width: 20, height: 20, borderRadius: 6, background: h, border: "none", padding: 0, cursor: "pointer",
+            boxShadow: color === h ? `0 0 0 2px ${COLORS.bg}, 0 0 0 4px ${h}` : "none"
+          }} />
+        ))}
+      </div>
+      {error && <div style={{ color: COLORS.rose, fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 6 }}>
+        <button type="button" onClick={submit} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Add type</button>
+        {!alwaysOpen && <button type="button" onClick={reset} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>Cancel</button>}
+      </div>
+    </div>
+  );
+}
+
+// Settings list for the user's own account types: rename, re-icon, recolour, delete.
+function AccountTypesManager({ api, accounts }) {
+  const [editing, setEditing] = useState(null);
+  const [name, setName] = useState("");
+  const types = api.types;
+  const usage = (id) => accounts.filter((a) => a.type === id).length;
+  const commit = (t) => {
+    const res = api.onUpdate(t.id, { label: name });
+    if (res.ok) setEditing(null);
+  };
+  return (
+    <SectionCard title="Account Types" icon={<Landmark size={13} />}>
+      <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+        Add your own account types (e.g. Investments, Joint Account) with a custom icon and colour — they appear alongside Bank, Cash and the rest when you add or edit an account. Deleting one moves its accounts to "Other" and keeps the name as their label.
+      </div>
+      {types.length === 0 && <EmptyNote>No custom types yet. Add one below.</EmptyNote>}
+      {types.map((t, i) => {
+        const Ico = ACCOUNT_ICON_OPTIONS[t.icon] || CircleDollarSign;
+        const isEditing = editing === t.id;
+        return (
+          <div key={t.id} style={{ padding: "10px 2px", borderBottom: i === types.length - 1 ? "none" : "1px solid " + COLORS.border }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 30, height: 30, borderRadius: "50%", background: withAlpha(t.color, "22"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Ico size={14} color={t.color} />
+              </span>
+              {isEditing ? (
+                <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(t); if (e.key === "Escape") setEditing(null); }} style={{ flex: 1, minWidth: 0, fontSize: 13.5 }} />
+              ) : (
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>
+              )}
+              <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usage(t.id)} account{usage(t.id) === 1 ? "" : "s"}</span>
+              {isEditing ? (
+                <>
+                  <button onClick={() => commit(t)} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex" }}><Check size={12} /></button>
+                  <button onClick={() => setEditing(null)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "6px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => { setEditing(t.id); setName(t.label); }} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Pencil size={13} /></button>
+                  <button onClick={() => api.onRemove(t.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}><Trash2 size={13} /></button>
+                </>
+              )}
+            </div>
+            {isEditing && (
+              <div style={{ marginTop: 10, paddingLeft: 40 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+                  {Object.entries(ACCOUNT_ICON_OPTIONS).map(([key, I2]) => (
+                    <button key={key} type="button" onClick={() => api.onUpdate(t.id, { icon: key })} aria-label={key} style={{
+                      width: 28, height: 28, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                      border: "1px solid " + (t.icon === key ? t.color : COLORS.border), background: t.icon === key ? withAlpha(t.color, "22") : COLORS.card
+                    }}><I2 size={13} color={t.icon === key ? t.color : COLORS.muted} /></button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {CATEGORY_COLOR_PRESETS.map((h) => (
+                    <button key={h} type="button" onClick={() => api.onUpdate(t.id, { color: h })} aria-label={h} style={{
+                      width: 20, height: 20, borderRadius: 6, background: h, border: "none", padding: 0, cursor: "pointer",
+                      boxShadow: t.color === h ? `0 0 0 2px ${COLORS.card}, 0 0 0 4px ${h}` : "none"
+                    }} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <AccountTypeAdder api={api} alwaysOpen />
+    </SectionCard>
+  );
 }
 
 function CategorySelect({ value, onChange, options, type, onAddCategory, compact, allowGroups }) {
