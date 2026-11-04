@@ -1507,6 +1507,7 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
       .slice(0, 3);
   }, [recurring]);
 
+  const [showAllWatch, setShowAllWatch] = useState(false);
   const budgetWatch = useMemo(() => {
     const items = [];
     const now = new Date();
@@ -1517,7 +1518,7 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
           const r = periodRange(pt, now);
           const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && categoryScope(groups, type, category).includes(e.category) && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
           const pct = lim > 0 ? (spent / lim) * 100 : 0;
-          items.push({ label: `${category}${isParentName(groups, type, category) ? " (group)" : ""} · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
+          items.push({ label: `${category}${isParentName(groups, type, category) ? " (group)" : ""} · ${PERIOD_LABEL[pt]}`, title: category, isGroup: isParentName(groups, type, category), periodLabel: PERIOD_LABEL[pt], pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category, type, isGoal: type === "income" });
         });
       });
       ["daily", "weekly", "monthly"].forEach((pt) => {
@@ -1526,7 +1527,7 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
         const r = periodRange(pt, now);
         const spent = entries.filter((e) => e.type === type && !isExcludedFrom(e, pt) && e.date >= r.start && e.date <= r.end).reduce((s, e) => s + e.amount, 0);
         const pct = lim > 0 ? (spent / lim) * 100 : 0;
-        items.push({ label: type === "income" ? `Master Income · ${PERIOD_LABEL[pt]}` : `Master · ${PERIOD_LABEL[pt]}`, pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null, type, isGoal: type === "income" });
+        items.push({ label: type === "income" ? `Master Income · ${PERIOD_LABEL[pt]}` : `Master · ${PERIOD_LABEL[pt]}`, title: type === "income" ? "Master income goal" : "Master budget", isMaster: true, periodLabel: PERIOD_LABEL[pt], pct, spent, lim, ledgerPeriod: ledgerPeriodFor[pt], category: null, type, isGoal: type === "income" });
       });
     });
     // Every budget (and income goal) you've set shows up here, sorted by how close
@@ -1604,28 +1605,76 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
       )}>
         {budgetWatch.length === 0 ? (
           <EmptyNote>No budgets set yet — set one in the Budgets tab.</EmptyNote>
-        ) : budgetWatch.map((b, i) => {
-          const barColor = b.isGoal
-            ? (b.pct >= 100 ? COLORS.green : b.pct >= 70 ? COLORS.amber : COLORS.blue)
-            : (b.pct >= 100 ? COLORS.rose : b.pct >= 70 ? COLORS.amber : COLORS.green);
-          const remaining = b.lim - b.spent;
+        ) : (() => {
+          const WATCH_LIMIT = 5;
+          const shown = showAllWatch ? budgetWatch : budgetWatch.slice(0, WATCH_LIMIT);
+          const statusOf = (b) => budgetStatus(b.lim, b.spent, b.isGoal);
+          const overCount = budgetWatch.filter((b) => !b.isGoal && statusOf(b) === "over").length;
+          const nearCount = budgetWatch.filter((b) => !b.isGoal && statusOf(b) === "near").length;
+          const reachedCount = budgetWatch.filter((b) => b.isGoal && statusOf(b) === "reached").length;
+          const chips = [
+            overCount > 0 && { text: `${overCount} over`, color: COLORS.rose },
+            nearCount > 0 && { text: `${nearCount} near limit`, color: COLORS.amber },
+            reachedCount > 0 && { text: `${reachedCount} goal${reachedCount === 1 ? "" : "s"} reached`, color: COLORS.green },
+          ].filter(Boolean);
+          const allClear = chips.length === 0;
           return (
-          <div key={i} onClick={() => onGoLedgerFiltered && onGoLedgerFiltered(b.ledgerPeriod, b.category, b.isGoal ? b.type : undefined)} style={{ marginBottom: i === budgetWatch.length - 1 ? 0 : 10, cursor: onGoLedgerFiltered ? "pointer" : "default" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-              <span style={{ fontWeight: 600 }}>{b.label}</span>
-              <span className="mono" style={{ color: !b.isGoal && b.pct >= 100 ? COLORS.rose : COLORS.muted }}>{fmt(b.spent)} / {fmt(b.lim)}</span>
+            <div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {allClear ? (
+                  <span style={{ padding: "4px 10px", borderRadius: 999, background: withAlpha(COLORS.green, "1F"), color: COLORS.green, fontSize: 11.5, fontWeight: 700 }}>All on track</span>
+                ) : chips.map((ch) => (
+                  <span key={ch.text} style={{ padding: "4px 10px", borderRadius: 999, background: withAlpha(ch.color, "1F"), color: ch.color, fontSize: 11.5, fontWeight: 700 }}>{ch.text}</span>
+                ))}
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {shown.map((b, i) => {
+                  const status = statusOf(b);
+                  const color = budgetStatusColor(status);
+                  const remaining = b.lim - b.spent;
+                  const note = b.isGoal
+                    ? (remaining <= 0 ? `Goal reached · +${fmt(-remaining)} over` : `${fmt(remaining)} to go`)
+                    : (remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`);
+                  const noteColor = b.isGoal ? (remaining <= 0 ? COLORS.green : COLORS.muted) : (remaining < 0 ? COLORS.rose : COLORS.muted);
+                  return (
+                    <div key={b.label + b.type + i}
+                      onClick={() => onGoLedgerFiltered && onGoLedgerFiltered(b.ledgerPeriod, b.category, b.isGoal ? b.type : undefined)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 14, background: COLORS.bg,
+                        border: "1px solid " + (status === "over" ? withAlpha(COLORS.rose, "55") : COLORS.border),
+                        cursor: onGoLedgerFiltered ? "pointer" : "default"
+                      }}>
+                      <BudgetRing pct={b.pct} color={color} size={46} stroke={5} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                          {b.category && <span style={{ width: 8, height: 8, borderRadius: 2, background: catColor(b.category), flexShrink: 0 }} />}
+                          <span style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.title}</span>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: COLORS.card, color: COLORS.muted, border: "1px solid " + COLORS.border, flexShrink: 0 }}>{b.periodLabel}</span>
+                          {b.isGroup && <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600, flexShrink: 0 }}>group</span>}
+                        </div>
+                        <div style={{ height: 4, borderRadius: 3, background: COLORS.border, overflow: "hidden", margin: "7px 0 5px" }}>
+                          <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: color, borderRadius: 3 }} />
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                          <span className="mono" style={{ fontSize: 11.5, color: COLORS.muted }}>{fmt(b.spent)} <span style={{ color: COLORS.mutedLight }}>/ {fmt(b.lim)}</span></span>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: noteColor, whiteSpace: "nowrap" }}>{note}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {budgetWatch.length > WATCH_LIMIT && (
+                <button onClick={() => setShowAllWatch((v) => !v)} style={{
+                  marginTop: 10, width: "100%", background: "none", border: "1px dashed " + COLORS.border, borderRadius: 999,
+                  padding: "7px 12px", fontSize: 12, fontWeight: 700, color: COLORS.muted, cursor: "pointer"
+                }}>
+                  {showAllWatch ? "Show fewer" : `Show all ${budgetWatch.length}`}
+                </button>
+              )}
             </div>
-            <div style={{ height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: barColor, borderRadius: 4 }} />
-            </div>
-            <div className="mono" style={{ fontSize: 10.5, marginTop: 3, fontWeight: 600, color: b.isGoal ? (remaining <= 0 ? COLORS.green : COLORS.mutedLight) : (remaining < 0 ? COLORS.rose : COLORS.mutedLight) }}>
-              {b.isGoal
-                ? (remaining <= 0 ? `Goal reached · +${fmt(-remaining)} over` : `${fmt(remaining)} to go`)
-                : (remaining < 0 ? `Over by ${fmt(-remaining)}` : `${fmt(remaining)} left`)}
-            </div>
-          </div>
           );
-        })}
+        })()}
       </SectionCard>
 
       <div style={{ height: 16 }} />
@@ -3506,7 +3555,7 @@ function BudgetRing({ pct, color, size = 76, stroke = 8 }) {
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
           strokeDasharray={circ} strokeDashoffset={circ * (1 - shown / 100)} style={{ transition: "stroke-dashoffset .5s ease" }} />
       </svg>
-      <div className="mono" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size >= 90 ? 18 : 14, fontWeight: 800 }}>
+      <div className="mono" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size >= 90 ? 18 : size >= 60 ? 14 : 11, fontWeight: 800 }}>
         {Math.round(pct)}%
       </div>
     </div>
@@ -3598,6 +3647,98 @@ function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel,
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// "Custom" view on the Budgets page: pick any From/To dates and see what was
+// spent (or earned) per category/group in that window, for viewing only — no
+// limits are applied to it. Categories that have a budget are tagged.
+function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome }) {
+  const [from, setFrom] = useState(() => defaultCustomRange().from);
+  const [to, setTo] = useState(() => defaultCustomRange().to);
+  const [open, setOpen] = useState({});
+  const range = customRange(from, to);
+
+  const scoped = useMemo(() => entries
+    .filter((e) => e.type === budgetType && e.date >= range.start && e.date <= range.end)
+    // Left out only when it's excluded from every budget period.
+    .filter((e) => excludedPeriodsOf(e).length < BUDGET_PERIODS.length),
+  [entries, budgetType, range.start, range.end]);
+  const total = scoped.reduce((s, e) => s + e.amount, 0);
+
+  const rows = useMemo(() => {
+    const map = {};
+    scoped.forEach((e) => {
+      const key = parentOf(groups, budgetType, e.category) || e.category;
+      (map[key] = map[key] || { name: key, total: 0, tx: [] });
+      map[key].total += e.amount;
+      map[key].tx.push(e);
+    });
+    return Object.values(map).map((r) => ({ ...r, tx: r.tx.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt) }))
+      .sort((a, b) => b.total - a.total);
+  }, [scoped, groups, budgetType]);
+
+  const days = from && to ? Math.max(1, Math.round((parseLocal(to) - parseLocal(from)) / 86400000) + 1) : null;
+  const isBudgeted = (name) => budgetedNames.has(name) || childrenOf(groups, budgetType, name).some((c) => budgetedNames.has(c));
+
+  return (
+    <div>
+      <CustomRangePicker from={from} to={to} onChange={(r) => { setFrom(r.from); setTo(r.to); }} />
+      <div style={{ fontSize: 11, color: COLORS.mutedLight, margin: "10px 0 14px" }}>
+        For viewing only — this shows what you {isIncome ? "earned" : "spent"} in these dates and doesn't compare against your limits.
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: COLORS.mutedLight, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            {isIncome ? "Earned" : "Spent"} · {range.label}
+          </div>
+          <div className="mono" style={{ fontSize: 24, fontWeight: 800 }}>{fmt(total)}</div>
+        </div>
+        {days != null && total > 0 && (
+          <div style={{ fontSize: 12, color: COLORS.muted, fontWeight: 600 }} className="mono">{fmt(total / days)} / day · {scoped.length} transaction{scoped.length === 1 ? "" : "s"}</div>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <EmptyNote>No {isIncome ? "income" : "expenses"} in this date range.</EmptyNote>
+      ) : rows.map((r) => {
+        const pct = total > 0 ? (r.total / total) * 100 : 0;
+        const isOpen = !!open[r.name];
+        const color = catColor(r.name);
+        const grouped = isParentName(groups, budgetType, r.name);
+        return (
+          <div key={r.name} style={{ background: COLORS.bg, borderRadius: 14, padding: "10px 12px", marginBottom: 8, border: "1px solid " + COLORS.border }}>
+            <div onClick={() => setOpen((o) => ({ ...o, [r.name]: !o[r.name] }))} role="button" aria-expanded={isOpen} style={{ cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <ChevronDown size={12} style={{ color: COLORS.muted, flexShrink: 0, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                  <span style={{ width: 9, height: 9, borderRadius: 3, background: color, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                  {grouped && <span style={{ fontSize: 10.5, color: COLORS.mutedLight, fontWeight: 600 }}>group</span>}
+                  {isBudgeted(r.name) && <span style={{ fontSize: 10.5, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: COLORS.card, color: COLORS.muted, border: "1px solid " + COLORS.border, flexShrink: 0 }}>{isIncome ? "Has goal" : "Budgeted"}</span>}
+                </span>
+                <span className="mono" style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{fmt(r.total)} <span style={{ color: COLORS.mutedLight, fontWeight: 600, fontSize: 11 }}>· {pct.toFixed(0)}%</span></span>
+              </div>
+              <div style={{ height: 5, borderRadius: 3, background: COLORS.border, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 3 }} />
+              </div>
+            </div>
+            {isOpen && (
+              <div style={{ marginTop: 8, background: COLORS.card, borderRadius: 10, padding: "4px 10px", maxHeight: 240, overflowY: "auto" }}>
+                {r.tx.map((e, i) => (
+                  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "5px 0", borderBottom: i < r.tx.length - 1 ? "1px solid " + COLORS.border : "none" }}>
+                    <span style={{ color: COLORS.muted, display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                      <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(e.category), flexShrink: 0 }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relDateLabel(e.date)}{grouped ? " · " + e.category : ""}{e.note ? " · " + e.note : ""}</span>
+                    </span>
+                    <span className="mono" style={{ flexShrink: 0, marginLeft: 8 }}>{fmt(e.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3716,12 +3857,15 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
       {/* Summary */}
       <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} icon={<Target size={13} />} right={
         <div style={{ display: "flex", gap: 6 }}>
-          {BUDGET_PERIODS.map((pt) => (
-            <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{PERIOD_LABEL[pt]}</button>
+          {[...BUDGET_PERIODS, "custom"].map((pt) => (
+            <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{pt === "custom" ? "Custom" : PERIOD_LABEL[pt]}</button>
           ))}
         </div>
       }>
-        {!heroHas ? (
+        {heroPeriod === "custom" ? (
+          <BudgetRangeView entries={entries} groups={groups} budgetType={budgetType} isIncome={isIncome}
+            budgetedNames={new Set(Object.keys(groupBudgets).filter((k) => Object.keys(groupBudgets[k]).length > 0))} />
+        ) : !heroHas ? (
           <EmptyNote>No {heroPeriod} {isIncome ? "goals" : "budgets"} set yet. Add one below to see your overview.</EmptyNote>
         ) : (
           <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
