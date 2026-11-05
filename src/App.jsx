@@ -639,6 +639,7 @@ function emptyData() {
     categoryGroups: normalizeCategoryGroups(null),
     categoryGroupsPrompted: false,
     customAccountTypes: [],
+    onboarding: { tourSeen: false, checklistDismissed: false },
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
@@ -703,6 +704,7 @@ export default function FinanceTracker() {
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [tab]);
+  const [tourOpen, setTourOpen] = useState(false);
   const generatedRef = useRef(false);
   const navRef = useRef(null);
 
@@ -724,6 +726,8 @@ export default function FinanceTracker() {
             categoryGroups: normalizeCategoryGroups(parsed.categoryGroups),
             categoryGroupsPrompted: !!parsed.categoryGroupsPrompted,
             customAccountTypes: Array.isArray(parsed.customAccountTypes) ? parsed.customAccountTypes : [],
+            // Anyone with saved data from before the tour existed is an existing user: no auto-tour.
+            onboarding: parsed.onboarding || { tourSeen: true, checklistDismissed: true },
             theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
             profile: parsed.profile || { name: "" }
           });
@@ -786,6 +790,23 @@ export default function FinanceTracker() {
       return { ...prev, entries: [...prev.entries, ...newEntries], recurring: updatedRecurring };
     });
   }, [loaded]);
+
+  // Brand-new users (no saved data yet) get the tour automatically, once.
+  useEffect(() => {
+    if (loaded && !data.onboarding.tourSeen) setTourOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
+
+  const finishTour = () => {
+    setTourOpen(false);
+    setData((prev) => ({ ...prev, onboarding: { ...prev.onboarding, tourSeen: true } }));
+    setTab("dashboard");
+  };
+  const dismissChecklist = () => setData((prev) => ({ ...prev, onboarding: { ...prev.onboarding, checklistDismissed: true } }));
+  const showChecklist = () => {
+    setData((prev) => ({ ...prev, onboarding: { ...prev.onboarding, checklistDismissed: false } }));
+    pushToast("Getting Started checklist is back on your dashboard", "success", Sparkles);
+  };
 
   const addEntry = (entry) => {
     setData((prev) => ({ ...prev, entries: [...prev.entries, { id: uid(), createdAt: Date.now(), ...entry }] }));
@@ -1192,7 +1213,7 @@ export default function FinanceTracker() {
   const setProfile = (patch) => setData((prev) => ({ ...prev, profile: { ...prev.profile, ...patch } }));
 
   const resetAllData = () => {
-    setData(emptyData());
+    setData((prev) => ({ ...emptyData(), onboarding: prev.onboarding }));
     pushToast("All account data has been reset", "danger", Trash2);
   };
 
@@ -1256,10 +1277,11 @@ export default function FinanceTracker() {
     <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
       <GlobalStyle />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {tourOpen && <TourOverlay steps={TOUR_STEPS} onSetTab={setTab} onFinish={finishTour} />}
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} NAV={NAV} tab={tab} setTab={setTab} profileName={data.profile.name} />
       <div style={{ maxWidth: 860, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-          <button className="mobile-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu" style={{
+          <button className="mobile-menu-btn" data-tour="menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu" style={{
             background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 9, cursor: "pointer", color: COLORS.text, boxShadow: SHADOW
           }}>
             <Menu size={18} />
@@ -1279,7 +1301,7 @@ export default function FinanceTracker() {
           </div>
         </div>
 
-        <nav ref={navRef} className="nav-top-bar" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 22 }}>
+        <nav ref={navRef} data-tour="nav" className="nav-top-bar" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 22 }}>
           {NAV.map((item) => item.children ? (
             <div key={item.group} style={{ position: "relative" }}>
               <button onClick={() => setOpenGroup(openGroup === item.group ? null : item.group)}
@@ -1313,6 +1335,10 @@ export default function FinanceTracker() {
           {tab === "dashboard" && (
             <Dashboard
               entries={data.entries}
+              showChecklist={!data.onboarding.checklistDismissed}
+              onDismissChecklist={dismissChecklist}
+              onStartTour={() => setTourOpen(true)}
+              onGoTab={setTab}
               groups={data.categoryGroups}
               groupSuggestions={groupSuggestions}
               onApplyGroups={applyGroupSuggestions}
@@ -1404,6 +1430,9 @@ export default function FinanceTracker() {
               onResetCategoryColor={resetCategoryColor}
               accountTypeApi={accountTypeApi}
               accounts={data.accounts}
+              onStartTour={() => setTourOpen(true)}
+              onShowChecklist={showChecklist}
+              checklistHidden={data.onboarding.checklistDismissed}
               groupApi={{
                 groups: data.categoryGroups, suggestions: groupSuggestions,
                 onAddParent: addParent, onRenameParent: renameParent, onDeleteParent: deleteParent,
@@ -1449,7 +1478,7 @@ function GroupSuggestionCard({ suggestions, onApply, onDismiss }) {
   );
 }
 
-function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismissGroups, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
+function Dashboard({ entries, showChecklist, onDismissChecklist, onStartTour, onGoTab, groups, groupSuggestions, onApplyGroups, onDismissGroups, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
   const [statScope, setStatScope] = useState("month");
   const cmk = thisMonthKey();
 
@@ -1550,6 +1579,14 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
         <QuickAction icon={<Sparkles size={18} />} color={COLORS.orange} label="Insights" onClick={onGoInsights} />
       </div>
 
+      {showChecklist && (
+        <>
+          <GettingStartedCard entries={entries} accounts={accounts} budgets={budgets} masterBudgets={masterBudgets} recurring={recurring} groups={groups}
+            onGoTab={onGoTab} onQuickAction={onQuickAction} onStartTour={onStartTour} onDismiss={onDismissChecklist} />
+          <div style={{ height: 16 }} />
+        </>
+      )}
+
       {groupSuggestions && groupSuggestions.length > 0 && (
         <>
           <GroupSuggestionCard suggestions={groupSuggestions} onApply={onApplyGroups} onDismiss={onDismissGroups} />
@@ -1598,7 +1635,7 @@ function Dashboard({ entries, groups, groupSuggestions, onApplyGroups, onDismiss
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Budget Watch" right={onGoBudgets && (
+      <SectionCard title="Budget Watch" tour="budget-watch" right={onGoBudgets && (
         <button onClick={onGoBudgets} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
           View all →
         </button>
@@ -1756,7 +1793,7 @@ function HeroCard({ balance, net }) {
   const positive = net >= 0;
   const animatedBalance = useCountUp(balance, 700);
   return (
-    <div style={{
+    <div data-tour="hero" style={{
       background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.orangeDark})`,
       borderRadius: 24, padding: "22px 22px 30px", color: "#fff", position: "relative", overflow: "hidden"
     }}>
@@ -2057,7 +2094,7 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Add an Account">
+      <SectionCard title="Add an Account" tour="accounts-add">
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
           Set up your bank, e-wallet, or cash on hand with a starting balance — new transactions can then be tagged to it.
         </div>
@@ -2480,7 +2517,7 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="New Transaction">
+      <SectionCard title="New Transaction" tour="add-form">
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           {["expense", "income", "transfer"].map((t) => (
             <button key={t} onClick={() => switchType(t)} style={{
@@ -2940,7 +2977,7 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
     : anchor.getFullYear() === new Date().getFullYear() && anchor.getMonth() === new Date().getMonth();
 
   return (
-    <SectionCard title="Transaction Ledger" right={
+    <SectionCard title="Transaction Ledger" tour="ledger" right={
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={() => { setImportOpen((v) => !v); setFiltersOpen(false); }} style={{
           display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 999,
@@ -3298,7 +3335,7 @@ function Insights({ entries, accounts, groups }) {
 
   return (
     <div>
-      <SectionCard title="View By">
+      <SectionCard title="View By" tour="insights-view">
         <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 0 : 16 }}>
           {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["custom", "Custom"], ["all", "All Time"]].map(([id, label]) => (
             <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
@@ -3855,7 +3892,7 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
       </div>
 
       {/* Summary */}
-      <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} icon={<Target size={13} />} right={
+      <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} tour="budgets-overview" icon={<Target size={13} />} right={
         <div style={{ display: "flex", gap: 6 }}>
           {[...BUDGET_PERIODS, "custom"].map((pt) => (
             <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{pt === "custom" ? "Custom" : PERIOD_LABEL[pt]}</button>
@@ -4031,7 +4068,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
 
   return (
     <div>
-      <SectionCard title="New Recurring Transaction">
+      <SectionCard title="New Recurring Transaction" tour="recurring-new">
         <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
           {["expense", "income"].map((t) => (
             <button key={t} onClick={() => switchType(t)} style={{
@@ -4239,6 +4276,225 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
   );
 }
 
+/* ---------- guided tour + getting-started checklist ---------- */
+
+// Each step can switch tabs, spotlight a real part of the app (first selector
+// that is actually visible wins, so phones fall back to the menu button) and
+// ask the user to try something — the spotlighted area stays clickable.
+const TOUR_STEPS = [
+  { id: "welcome", tab: "dashboard", center: true, title: "Welcome! 👋",
+    body: "Let's take a quick tour of your finance tracker — about a minute. You'll see where everything lives and can try things as we go. You can skip any time and replay it later from Settings." },
+  { id: "nav", tab: "dashboard", target: ['[data-tour="nav"]', '[data-tour="menu-btn"]'], title: "Getting around",
+    body: "These tabs (or the menu button on your phone) take you everywhere: Accounts, Transactions, Analysis and Planning, plus Settings. Groups like Transactions open a small menu." },
+  { id: "hero", tab: "dashboard", target: ['[data-tour="hero"]'], title: "Your balance at a glance",
+    body: "This card shows your total balance across every account and how much you've saved or overspent this month. The dashboard below it keeps your recent activity, upcoming bills and Budget Watch." },
+  { id: "watch", tab: "dashboard", target: ['[data-tour="budget-watch"]'], title: "Budget Watch",
+    body: "Once you set budgets or income goals, the ones closest to their limit appear here with progress rings. Tap any card to jump to the matching transactions." },
+  { id: "accounts", tab: "accounts", target: ['[data-tour="accounts-add"]'], title: "Start with your accounts",
+    body: "Add your bank, e-wallet or cash with its current balance. Every transaction can then be tagged to an account, and you can reconcile an account later if its balance drifts from your real one.",
+    tryIt: "Try it: type an account name and a starting balance, then press Add." },
+  { id: "add", tab: "add", target: ['[data-tour="add-form"]'], title: "Logging money in and out",
+    body: "Choose Expense, Income or Transfer, enter the amount (the decimal point is placed for you), pick a category and account, then add it. Quick Entry and Quick Add above this card make repeat purchases even faster. You can also split costs with friends here.",
+    tryIt: "Try it: switch between Expense and Income to see the categories change." },
+  { id: "ledger", tab: "ledger", target: ['[data-tour="ledger"]'], title: "Your ledger",
+    body: "Every transaction lives here. Use Filters to narrow by date (including a custom range), type, category group or account. Import brings in a bank statement from CSV or PDF, and the pencil edits an entry." },
+  { id: "budgets", tab: "budgets", target: ['[data-tour="budgets-overview"]'], title: "Budgets and income goals",
+    body: "Set limits per day, week or month for a category, a whole category group, or everything combined. Switch to Income Goals to set earning targets, and use Custom to look at any date range." },
+  { id: "insights", tab: "insights", target: ['[data-tour="insights-view"]'], title: "Insights",
+    body: "See where your money goes: trends, comparisons to the previous period, and breakdowns by category group, category or account. Tap any row to see the exact transactions behind it, and pick Day, Week, Month, Custom or All Time.",
+    tryIt: "Try it: tap Custom to choose your own dates." },
+  { id: "recurring", tab: "recurring", target: ['[data-tour="recurring-new"]'], title: "Recurring payments",
+    body: "Rent, subscriptions, salary — set them up once and they're logged automatically when the app is opened on or after their due day. Add an end date for instalments or fixed-term plans." },
+  { id: "settings", tab: "settings", target: ['[data-tour="settings-guide"]'], title: "Make it yours",
+    body: "In Settings you can set your name, switch theme and colours, organise categories into groups, create your own account types, and replay this tour anytime from the Guided Tour section." },
+  { id: "done", tab: "dashboard", center: true, title: "You're all set! 🎉",
+    body: "Your dashboard now has a short Getting Started checklist — add an account, log a transaction, set a budget — that ticks itself off as you go. Have fun!" },
+];
+
+function TourOverlay({ steps, onSetTab, onFinish }) {
+  const [i, setI] = useState(0);
+  const [rect, setRect] = useState(null);
+  const [vp, setVp] = useState({ w: window.innerWidth, h: window.innerHeight });
+  const elRef = useRef(null);
+  const step = steps[i];
+  const last = i === steps.length - 1;
+
+  useEffect(() => { if (step.tab) onSetTab(step.tab); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [i]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onFinish();
+      if (e.key === "ArrowRight") setI((n) => Math.min(steps.length - 1, n + 1));
+      if (e.key === "ArrowLeft") setI((n) => Math.max(0, n - 1));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [steps.length, onFinish]);
+
+  // Find the step's target (waiting for the tab to render), bring it into
+  // view, then keep its position in sync while the page scrolls or resizes.
+  useEffect(() => {
+    elRef.current = null;
+    setRect(null);
+    if (!step.target) return undefined;
+    let cancelled = false, tries = 0, timer = null;
+    const find = () => {
+      for (const sel of step.target) {
+        const el = document.querySelector(sel);
+        if (el) { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return el; }
+      }
+      return null;
+    };
+    const measure = () => {
+      const el = elRef.current;
+      if (!el || !document.contains(el)) return;
+      const r = el.getBoundingClientRect();
+      setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+    };
+    const locate = () => {
+      if (cancelled) return;
+      const el = find();
+      if (!el) { if (tries++ < 40) timer = setTimeout(locate, 60); return; }
+      elRef.current = el;
+      const r = el.getBoundingClientRect();
+      el.scrollIntoView({ block: r.height > window.innerHeight * 0.6 ? "start" : "center", behavior: "auto" });
+      timer = setTimeout(measure, 40);
+    };
+    locate();
+    const onMove = () => { setVp({ w: window.innerWidth, h: window.innerHeight }); measure(); };
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    return () => { cancelled = true; clearTimeout(timer); window.removeEventListener("scroll", onMove, true); window.removeEventListener("resize", onMove); };
+  }, [i]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const PAD = 6;
+  const hole = rect ? {
+    top: Math.max(0, rect.top - PAD), left: Math.max(0, rect.left - PAD),
+    right: Math.min(vp.w, rect.left + rect.width + PAD), bottom: Math.min(vp.h, rect.top + rect.height + PAD),
+  } : null;
+  const dim = { position: "fixed", background: "rgba(10,14,24,0.62)", zIndex: 1000 };
+
+  const cardW = Math.min(340, vp.w - 24);
+  const CARD_H = 250;
+  let cardStyle;
+  if (!hole) {
+    cardStyle = { top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
+  } else if (vp.h - hole.bottom >= CARD_H + 12) {
+    cardStyle = { top: hole.bottom + 12, left: Math.max(12, Math.min(hole.left, vp.w - cardW - 12)) };
+  } else if (hole.top >= CARD_H + 12) {
+    cardStyle = { bottom: vp.h - hole.top + 12, left: Math.max(12, Math.min(hole.left, vp.w - cardW - 12)) };
+  } else {
+    cardStyle = { bottom: 16, left: (vp.w - cardW) / 2 };
+  }
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="App tour">
+      {hole ? (
+        <>
+          <div style={{ ...dim, top: 0, left: 0, width: vp.w, height: hole.top }} />
+          <div style={{ ...dim, top: hole.bottom, left: 0, width: vp.w, height: Math.max(0, vp.h - hole.bottom) }} />
+          <div style={{ ...dim, top: hole.top, left: 0, width: hole.left, height: hole.bottom - hole.top }} />
+          <div style={{ ...dim, top: hole.top, left: hole.right, width: Math.max(0, vp.w - hole.right), height: hole.bottom - hole.top }} />
+          <div style={{
+            position: "fixed", top: hole.top, left: hole.left, width: hole.right - hole.left, height: hole.bottom - hole.top,
+            borderRadius: 14, border: "2px solid " + COLORS.orange, boxShadow: `0 0 0 4px ${withAlpha(COLORS.orange, "44")}`,
+            pointerEvents: "none", zIndex: 1001
+          }} />
+        </>
+      ) : (
+        <div style={{ ...dim, top: 0, left: 0, width: "100vw", height: "100vh" }} />
+      )}
+      <div style={{
+        position: "fixed", width: cardW, boxSizing: "border-box", zIndex: 1002, background: COLORS.card, color: COLORS.text,
+        borderRadius: 18, padding: 18, boxShadow: "0 12px 40px rgba(0,0,0,0.35)", border: "1px solid " + COLORS.border, ...cardStyle
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.mutedLight, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Step {i + 1} of {steps.length}
+          </span>
+          {!last && (
+            <button onClick={onFinish} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>Skip tour</button>
+          )}
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>{step.title}</div>
+        <div style={{ fontSize: 13, lineHeight: 1.5, color: COLORS.muted }}>{step.body}</div>
+        {step.tryIt && (
+          <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 10, background: COLORS.orangeLight, color: COLORS.orangeDark, fontSize: 12.5, fontWeight: 700 }}>
+            {step.tryIt}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 4, margin: "14px 0 12px" }}>
+          {steps.map((s, idx) => (
+            <span key={s.id} style={{ flex: 1, height: 3, borderRadius: 2, background: idx <= i ? COLORS.orange : COLORS.border }} />
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {i > 0 && (
+            <button onClick={() => setI((n) => n - 1)} style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, color: COLORS.muted, borderRadius: 10, padding: "9px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Back</button>
+          )}
+          <button autoFocus onClick={() => (last ? onFinish() : setI((n) => n + 1))} style={{ flex: 1, background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10, padding: "9px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            {last ? "Finish" : i === 0 ? "Start tour" : "Next"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "Getting started" card on the dashboard. Items tick themselves off from the
+// user's real data, and each row jumps to the place where it's done.
+function GettingStartedCard({ entries, accounts, budgets, masterBudgets, recurring, groups, onGoTab, onQuickAction, onStartTour, onDismiss }) {
+  const hasBudget = ["expense", "income"].some((t) => Object.keys((budgets && budgets[t]) || {}).length > 0 || Object.keys((masterBudgets && masterBudgets[t]) || {}).length > 0);
+  const hasGroups = !!groups && ["expense", "income"].some((t) => groups[t] && groups[t].parents.length > 0);
+  const tasks = [
+    { id: "account", label: "Add an account", hint: "Your bank, e-wallet or cash", done: accounts.length > 0, go: () => onGoTab("accounts") },
+    { id: "expense", label: "Log an expense", hint: "Record something you spent", done: entries.some((e) => e.type === "expense" && !e.adjustment), go: () => onQuickAction("expense") },
+    { id: "income", label: "Log some income", hint: "Salary, allowance, anything coming in", done: entries.some((e) => e.type === "income" && !e.adjustment), go: () => onQuickAction("income") },
+    { id: "budget", label: "Set a budget", hint: "A limit for a category, or an income goal", done: hasBudget, go: () => onGoTab("budgets") },
+    { id: "recurring", label: "Add a recurring payment", hint: "Rent, subscriptions or salary", done: recurring.length > 0, go: () => onGoTab("recurring") },
+    { id: "groups", label: "Group your categories", hint: "e.g. Food + Groceries under Food & Drink", done: hasGroups, go: () => onGoTab("settings") },
+  ];
+  const doneCount = tasks.filter((t) => t.done).length;
+  const allDone = doneCount === tasks.length;
+  const pct = (doneCount / tasks.length) * 100;
+
+  return (
+    <SectionCard title="Getting Started" icon={<Sparkles size={13} />} right={
+      <button onClick={onDismiss} aria-label="Hide checklist" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex", padding: 2 }}><X size={15} /></button>
+    }>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <div style={{ flex: 1, height: 6, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${pct}%`, background: COLORS.orange, borderRadius: 4, transition: "width .4s ease" }} />
+        </div>
+        <span className="mono" style={{ fontSize: 11.5, fontWeight: 700, color: COLORS.muted }}>{doneCount}/{tasks.length}</span>
+      </div>
+      {allDone ? (
+        <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12 }}>You've covered the essentials — nice work! 🎉 You can hide this card now.</div>
+      ) : tasks.map((t, idx) => (
+        <button key={t.id} onClick={t.go} disabled={t.done} style={{
+          display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: "none", border: "none",
+          padding: "8px 2px", borderBottom: idx === tasks.length - 1 ? "none" : "1px solid " + COLORS.border,
+          cursor: t.done ? "default" : "pointer", color: COLORS.text
+        }}>
+          <span style={{
+            width: 20, height: 20, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            background: t.done ? COLORS.green : "transparent", border: "2px solid " + (t.done ? COLORS.green : COLORS.border), color: "#fff"
+          }}>{t.done && <Check size={12} strokeWidth={3} />}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, textDecoration: t.done ? "line-through" : "none", color: t.done ? COLORS.mutedLight : COLORS.text }}>{t.label}</span>
+            {!t.done && <span style={{ display: "block", fontSize: 11.5, color: COLORS.muted }}>{t.hint}</span>}
+          </span>
+          {!t.done && <ChevronRight size={15} style={{ color: COLORS.mutedLight, flexShrink: 0 }} />}
+        </button>
+      ))}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={onStartTour} style={{ background: COLORS.orangeLight, color: COLORS.orangeDark, border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Replay tour</button>
+        {allDone && <button onClick={onDismiss} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Hide</button>}
+      </div>
+    </SectionCard>
+  );
+}
+
 /* ---------- mobile sidebar ---------- */
 
 function Sidebar({ open, onClose, NAV, tab, setTab, profileName }) {
@@ -4287,7 +4543,7 @@ function Sidebar({ open, onClose, NAV, tab, setTab, profileName }) {
 
 /* ---------- settings ---------- */
 
-function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory, onSetColor, onResetColor, groupApi }) {
+function CategoryManager({ categories, entries, onRename, onDelete, onAddCategory, onSetColor, onResetColor, groupApi, sectionProps }) {
   const [typeTab, setTypeTab] = useState("expense");
   const [editingName, setEditingName] = useState(null);
   const [editValue, setEditValue] = useState("");
@@ -4401,7 +4657,7 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
   );
 
   return (
-    <SectionCard title="Categories" icon={<Tag size={13} />}>
+    <SectionCard title="Categories" icon={<Tag size={13} />} {...(sectionProps || {})}>
       <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
         Rename or remove categories, and bundle related ones under a group (e.g. Food and Groceries under "Food & Drink"). Budgets and Insights can then total a whole group. Renaming updates every transaction, budget, and recurring item that uses it — deleting just stops offering it for new entries, past transactions keep their label.
       </div>
@@ -4542,8 +4798,10 @@ function AccentColorPicker({ value, onChange }) {
   );
 }
 
-function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, groupApi, accountTypeApi, accounts, onResetAll }) {
+function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entries, onRenameCategory, onDeleteCategory, onAddCategory, onSetCategoryColor, onResetCategoryColor, groupApi, accountTypeApi, accounts, onStartTour, onShowChecklist, checklistHidden, onResetAll }) {
   const [name, setName] = useState(profile.name);
+  const [openSections, setOpenSections] = useState({});
+  const sp = (id) => ({ collapsible: true, open: !!openSections[id], onToggle: () => setOpenSections((o) => ({ ...o, [id]: !o[id] })) });
 
   useEffect(() => { setName(profile.name); }, [profile.name]);
 
@@ -4553,7 +4811,7 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
 
   return (
     <div>
-      <SectionCard title="Profile" icon={<Users size={13} />}>
+      <SectionCard title="Profile" icon={<Users size={13} />} {...sp("profile")}>
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
           Set your name to personalize the greeting at the top of the app.
         </div>
@@ -4569,7 +4827,7 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
 
       <div style={{ height: 16 }} />
 
-      <SectionCard title="Appearance" icon={<Palette size={13} />}>
+      <SectionCard title="Appearance" icon={<Palette size={13} />} {...sp("appearance")}>
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
           Switch between light and dark, and pick any accent colors you like — it updates buttons, highlights, and charts throughout the app.
         </div>
@@ -4613,11 +4871,9 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
         <button onClick={reset} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>
           Reset to default
         </button>
-      </SectionCard>
 
-      <div style={{ height: 16 }} />
-
-      <SectionCard title="Preview">
+        <div style={{ borderTop: "1px solid " + COLORS.border, margin: "18px 0 14px" }} />
+        <FieldLabel>Preview</FieldLabel>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 12 }}>
           <div style={{ padding: "10px 18px", borderRadius: 12, background: COLORS.orange, color: "#fff", fontWeight: 700, fontSize: 13.5 }}>Primary Button</div>
           <div style={{ padding: "10px 16px", borderRadius: 999, background: COLORS.orangeLight, color: COLORS.orangeDark, fontWeight: 700, fontSize: 12.5 }}>Active Pill</div>
@@ -4629,22 +4885,42 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
         </div>
       </SectionCard>
 
-      <div style={{ height: 16 }} />
 
-      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} groupApi={groupApi} />
 
       <div style={{ height: 16 }} />
 
-      <AccountTypesManager api={accountTypeApi} accounts={accounts} />
+      <CategoryManager categories={categories} entries={entries} onRename={onRenameCategory} onDelete={onDeleteCategory} onAddCategory={onAddCategory} onSetColor={onSetCategoryColor} onResetColor={onResetCategoryColor} groupApi={groupApi} sectionProps={sp("categories")} />
 
       <div style={{ height: 16 }} />
 
-      <DangerZone onResetAll={onResetAll} />
+      <AccountTypesManager api={accountTypeApi} accounts={accounts} sectionProps={sp("accounttypes")} />
+
+      <div style={{ height: 16 }} />
+
+      <SectionCard title="Guided Tour & Help" icon={<Sparkles size={13} />} tour="settings-guide" {...sp("guide")}>
+        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+          New here, or want a refresher? Replay the interactive walkthrough of the app any time — it takes about a minute and you can skip out whenever you like.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={onStartTour} style={{ display: "flex", alignItems: "center", gap: 6, background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            <Sparkles size={14} /> Start the tour
+          </button>
+          {checklistHidden && (
+            <button onClick={onShowChecklist} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, color: COLORS.muted, borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              Show Getting Started checklist
+            </button>
+          )}
+        </div>
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      <DangerZone onResetAll={onResetAll} sectionProps={sp("danger")} />
     </div>
   );
 }
 
-function DangerZone({ onResetAll }) {
+function DangerZone({ onResetAll, sectionProps }) {
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const canConfirm = confirmText.trim().toUpperCase() === "RESET";
@@ -4657,7 +4933,7 @@ function DangerZone({ onResetAll }) {
   };
 
   return (
-    <SectionCard title="Danger Zone" icon={<Trash2 size={13} />}>
+    <SectionCard title="Danger Zone" icon={<Trash2 size={13} />} {...(sectionProps || {})}>
       <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
         Permanently erase every transaction, account, budget, recurring item, quick add, and category customization on your account. Your sign-in stays active, but this cannot be undone.
       </div>
@@ -4944,9 +5220,25 @@ function SummaryCard({ icon, label, value, color, sub }) {
   );
 }
 
-function SectionCard({ title, icon, right, children }) {
+function SectionCard({ title, icon, right, children, collapsible, open, onToggle, tour }) {
+  if (collapsible) {
+    return (
+      <div data-tour={tour} style={{ background: COLORS.card, borderRadius: 20, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+        <button type="button" onClick={onToggle} aria-expanded={!!open} style={{
+          display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "none", cursor: "pointer",
+          padding: "16px 18px", textAlign: "left", color: COLORS.muted
+        }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
+            {icon}{title}
+          </span>
+          <ChevronDown size={16} style={{ marginLeft: "auto", flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+        </button>
+        {open && <div style={{ padding: "0 18px 18px" }}>{children}</div>}
+      </div>
+    );
+  }
   return (
-    <div style={{ background: COLORS.card, borderRadius: 20, padding: 18, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+    <div data-tour={tour} style={{ background: COLORS.card, borderRadius: 20, padding: 18, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
           {icon}{title}
@@ -5118,7 +5410,7 @@ function AccountTypeAdder({ api, onCreated, alwaysOpen }) {
 }
 
 // Settings list for the user's own account types: rename, re-icon, recolour, delete.
-function AccountTypesManager({ api, accounts }) {
+function AccountTypesManager({ api, accounts, sectionProps }) {
   const [editing, setEditing] = useState(null);
   const [name, setName] = useState("");
   const types = api.types;
@@ -5128,7 +5420,7 @@ function AccountTypesManager({ api, accounts }) {
     if (res.ok) setEditing(null);
   };
   return (
-    <SectionCard title="Account Types" icon={<Landmark size={13} />}>
+    <SectionCard title="Account Types" icon={<Landmark size={13} />} {...(sectionProps || {})}>
       <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
         Add your own account types (e.g. Investments, Joint Account) with a custom icon and colour — they appear alongside Bank, Cash and the rest when you add or edit an account. Deleting one moves its accounts to "Other" and keeps the name as their label.
       </div>
