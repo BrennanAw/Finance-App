@@ -10,7 +10,7 @@ import {
   CalendarDays, ChevronLeft, ChevronRight, Target, BarChart3, Sparkles,
   Landmark, Banknote, CreditCard, CircleDollarSign, HandCoins, Pencil, Check,
   Moon, Sun, Palette, ArrowRightLeft, Menu, X, SlidersHorizontal, Tag, Upload,
-  Briefcase, Coins, Home, Car, GraduationCap, Gift, ShoppingBag, Smartphone, Building2, Gem, Heart, Star, Plane
+  Briefcase, Coins, Home, Car, GraduationCap, Gift, ShoppingBag, Smartphone, Building2, Gem, Heart, Star, Plane, MoreHorizontal
 } from "lucide-react";
 
 /* ---------- design tokens ---------- */
@@ -167,6 +167,30 @@ const CATEGORY_KEYWORDS = {
 // terminal does: typing "1250" yields "12.50" without needing to type a
 // decimal point. Non-digit characters (including any "." the user types)
 // are ignored; the last two digits typed are always the cents.
+// True on phone-width screens; used where a layout needs a different
+// structure (not just smaller spacing, which the CSS media queries handle).
+function useIsNarrow(maxWidth = 560) {
+  const query = `(max-width: ${maxWidth}px)`;
+  const get = () => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia(query).matches;
+  const [narrow, setNarrow] = useState(get);
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    onChange();
+    if (mq.addEventListener) mq.addEventListener("change", onChange); else mq.addListener(onChange);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
+  }, [query]);
+  return narrow;
+}
+// Short axis labels (1.5k, 12k) so chart axes don't get clipped on small screens.
+const compactTick = (v) => {
+  const a = Math.abs(v);
+  if (a >= 1000000) return (v / 1000000).toFixed(a >= 10000000 ? 0 : 1) + "m";
+  if (a >= 1000) return (v / 1000).toFixed(a >= 10000 ? 0 : 1) + "k";
+  return String(v);
+};
+
 function formatCentsInput(raw) {
   const digits = (raw || "").replace(/\D/g, "");
   if (!digits) return "";
@@ -631,6 +655,10 @@ function suggestGroups(categories, groups) {
   return out;
 }
 
+// Budget Watch view chosen on the dashboard. Saved with the account's data so
+// it stays put (on every device) until the user changes it.
+const DEFAULT_DASHBOARD_PREFS = { watchMode: "current", watchFrom: "", watchTo: "", watchType: "expense" };
+
 function emptyData() {
   return {
     entries: [], budgets: { expense: {}, income: {} }, recurring: [], masterBudgets: { expense: {}, income: {} }, accounts: [], quickAdds: QUICK_ADD_DEFAULTS,
@@ -640,6 +668,7 @@ function emptyData() {
     categoryGroupsPrompted: false,
     customAccountTypes: [],
     onboarding: { tourSeen: false, checklistDismissed: false },
+    dashboardPrefs: { ...DEFAULT_DASHBOARD_PREFS },
     theme: { ...DEFAULT_THEME },
     profile: { name: "" }
   };
@@ -728,6 +757,7 @@ export default function FinanceTracker() {
             customAccountTypes: Array.isArray(parsed.customAccountTypes) ? parsed.customAccountTypes : [],
             // Anyone with saved data from before the tour existed is an existing user: no auto-tour.
             onboarding: parsed.onboarding || { tourSeen: true, checklistDismissed: true },
+            dashboardPrefs: { ...DEFAULT_DASHBOARD_PREFS, ...(parsed.dashboardPrefs || {}) },
             theme: { ...DEFAULT_THEME, ...(parsed.theme || {}) },
             profile: parsed.profile || { name: "" }
           });
@@ -943,6 +973,8 @@ export default function FinanceTracker() {
   };
 
   const reportEntries = useMemo(() => data.entries.filter((e) => !e.adjustment), [data.entries]);
+
+  const setDashboardPrefs = (patch) => setData((prev) => ({ ...prev, dashboardPrefs: { ...DEFAULT_DASHBOARD_PREFS, ...(prev.dashboardPrefs || {}), ...patch } }));
 
   const toggleEntryBudget = (id) => {
     const entry = data.entries.find((e) => e.id === id);
@@ -1274,7 +1306,7 @@ export default function FinanceTracker() {
   });
 
   return (
-    <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
+    <div className="app-root" style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
       <GlobalStyle />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {tourOpen && <TourOverlay steps={TOUR_STEPS} onSetTab={setTab} onFinish={finishTour} />}
@@ -1335,6 +1367,8 @@ export default function FinanceTracker() {
           {tab === "dashboard" && (
             <Dashboard
               entries={data.entries}
+              watchPrefs={data.dashboardPrefs || DEFAULT_DASHBOARD_PREFS}
+              onSetWatchPrefs={setDashboardPrefs}
               showChecklist={!data.onboarding.checklistDismissed}
               onDismissChecklist={dismissChecklist}
               onStartTour={() => setTourOpen(true)}
@@ -1478,7 +1512,7 @@ function GroupSuggestionCard({ suggestions, onApply, onDismiss }) {
   );
 }
 
-function Dashboard({ entries, showChecklist, onDismissChecklist, onStartTour, onGoTab, groups, groupSuggestions, onApplyGroups, onDismissGroups, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
+function Dashboard({ entries, watchPrefs, onSetWatchPrefs, showChecklist, onDismissChecklist, onStartTour, onGoTab, groups, groupSuggestions, onApplyGroups, onDismissGroups, budgets, masterBudgets, accounts, recurring, onQuickAction, onGoInsights, onGoDebts, onGoLedger, onGoLedgerFiltered, onGoBudgets, onGoRecurring }) {
   const [statScope, setStatScope] = useState("month");
   const cmk = thisMonthKey();
 
@@ -1640,7 +1674,40 @@ function Dashboard({ entries, showChecklist, onDismissChecklist, onStartTour, on
           View all →
         </button>
       )}>
-        {budgetWatch.length === 0 ? (
+        {(() => {
+          const wp = watchPrefs || DEFAULT_DASHBOARD_PREFS;
+          const pillStyle = (active, accent, light) => ({
+            padding: "6px 12px", borderRadius: 999, border: "1px solid " + (active ? accent : COLORS.border),
+            background: active ? light : COLORS.card, color: active ? accent : COLORS.muted, fontSize: 11.5, fontWeight: 700, cursor: "pointer"
+          });
+          const toCustom = () => {
+            const d = defaultCustomRange();
+            onSetWatchPrefs({ watchMode: "custom", watchFrom: wp.watchFrom || d.from, watchTo: wp.watchTo || d.to });
+          };
+          return (
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 12 }}>
+              <button onClick={() => onSetWatchPrefs({ watchMode: "current" })} style={pillStyle(wp.watchMode !== "custom", COLORS.orangeDark, COLORS.orangeLight)}>Current periods</button>
+              <button onClick={toCustom} style={pillStyle(wp.watchMode === "custom", COLORS.orangeDark, COLORS.orangeLight)}>Custom range</button>
+              {wp.watchMode === "custom" && (
+                <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                  {[["expense", "Expense"], ["income", "Income"]].map(([id, label]) => (
+                    <button key={id} onClick={() => onSetWatchPrefs({ watchType: id })} style={pillStyle((wp.watchType || "expense") === id, COLORS.blue, COLORS.blueLight)}>{label}</button>
+                  ))}
+                </span>
+              )}
+            </div>
+          );
+        })()}
+        {(watchPrefs && watchPrefs.watchMode === "custom") ? (() => {
+          const t = watchPrefs.watchType === "income" ? "income" : "expense";
+          const grp = (budgets && budgets[t]) || {};
+          return (
+            <BudgetRangeView entries={entries} groups={groups} budgetType={t} isIncome={t === "income"} maxRows={5}
+              budgetedNames={new Set(Object.keys(grp).filter((k) => Object.keys(grp[k]).length > 0))}
+              from={watchPrefs.watchFrom} to={watchPrefs.watchTo}
+              onRangeChange={(r) => onSetWatchPrefs({ watchFrom: r.from, watchTo: r.to })} />
+          );
+        })() : budgetWatch.length === 0 ? (
           <EmptyNote>No budgets set yet — set one in the Budgets tab.</EmptyNote>
         ) : (() => {
           const WATCH_LIMIT = 5;
@@ -1692,8 +1759,8 @@ function Dashboard({ entries, showChecklist, onDismissChecklist, onStartTour, on
                         <div style={{ height: 4, borderRadius: 3, background: COLORS.border, overflow: "hidden", margin: "7px 0 5px" }}>
                           <div style={{ height: "100%", width: `${Math.min(100, b.pct)}%`, background: color, borderRadius: 3 }} />
                         </div>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-                          <span className="mono" style={{ fontSize: 11.5, color: COLORS.muted }}>{fmt(b.spent)} <span style={{ color: COLORS.mutedLight }}>/ {fmt(b.lim)}</span></span>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "2px 8px", flexWrap: "wrap" }}>
+                          <span className="mono" style={{ fontSize: 11.5, color: COLORS.muted, whiteSpace: "nowrap" }}>{fmt(b.spent)} <span style={{ color: COLORS.mutedLight }}>/ {fmt(b.lim)}</span></span>
                           <span style={{ fontSize: 11.5, fontWeight: 700, color: noteColor, whiteSpace: "nowrap" }}>{note}</span>
                         </div>
                       </div>
@@ -1957,8 +2024,8 @@ function ReconcilePanel({ account, balance, related, onReconcile }) {
       ) : (
         <div>
           <FieldLabel>Actual balance right now (RM)</FieldLabel>
-          <input type="number" step="0.01" placeholder="0.00" value={actual} onChange={(e) => setActual(e.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", marginBottom: 10 }} className="mono" />
+          <MoneyInput allowNegative value={actual} onChange={setActual}
+            style={{ width: "100%", boxSizing: "border-box", marginBottom: 10 }} />
 
           {hasActual && (
             <div style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
@@ -2098,7 +2165,7 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
         <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
           Set up your bank, e-wallet, or cash on hand with a starting balance — new transactions can then be tagged to it.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
+        <div className="mgrid-1" style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
           <div>
             <FieldLabel>Account Name</FieldLabel>
             <input type="text" placeholder="e.g. Maybank Savings" value={form.name}
@@ -2110,8 +2177,8 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
           </div>
           <div>
             <FieldLabel>Initial Balance (RM)</FieldLabel>
-            <input type="number" step="0.01" placeholder="0.00" value={form.initialBalance}
-              onChange={(e) => setForm((f) => ({ ...f, initialBalance: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }} className="mono" />
+            <MoneyInput allowNegative value={form.initialBalance}
+              onChange={(v) => setForm((f) => ({ ...f, initialBalance: v }))} style={{ width: "100%", boxSizing: "border-box" }} />
           </div>
           <button onClick={submit} style={{
             background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10,
@@ -2138,6 +2205,8 @@ function Accounts({ accounts, entries, onAdd, onUpdate, onRemove, onUpdateEntry,
 }
 
 function AccountRow({ account, accountTypeApi, balance, onUpdate, onRemove, onView, isLast }) {
+  const narrow = useIsNarrow();
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
   const [type, setType] = useState(account.type);
@@ -2160,7 +2229,7 @@ function AccountRow({ account, accountTypeApi, balance, onUpdate, onRemove, onVi
   if (editing) {
     return (
       <div style={{ padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, marginBottom: 8 }}>
+        <div className="grid-fill" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)", gap: 8, marginBottom: 8 }}>
           <input value={name} onChange={(e) => setName(e.target.value)} style={{ fontSize: 13 }} />
           <AccountTypeSelect value={type} onChange={setType} compact api={accountTypeApi} />
         </div>
@@ -2180,32 +2249,54 @@ function AccountRow({ account, accountTypeApi, balance, onUpdate, onRemove, onVi
     );
   }
 
+  const barBtn = { display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, border: "1px solid " + COLORS.border, background: COLORS.card, fontSize: 12.5, fontWeight: 700, cursor: "pointer" };
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
-      <div onClick={() => onView(account.id)} style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, cursor: "pointer" }}>
-        <span style={{ width: 38, height: 38, minWidth: 38, borderRadius: "50%", background: typeInfo.color + "22", color: typeInfo.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <Icon size={17} />
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.name}</div>
-          <div style={{ fontSize: 11, color: COLORS.muted }}>{account.customType || typeInfo.label} · Started at {fmt(account.initialBalance)}</div>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <div className="mono" style={{ fontSize: 14, fontWeight: 800 }}>{fmt(balance)}</div>
-          {delta !== 0 && (
-            <div style={{ fontSize: 11, fontWeight: 700, color: delta >= 0 ? COLORS.green : COLORS.rose }}>
-              {delta >= 0 ? "+" : "−"}{fmt(Math.abs(delta))}
+    <div style={{ borderBottom: isLast ? "none" : "1px solid " + COLORS.border }}>
+      <div style={{ display: "flex", alignItems: "center", gap: narrow ? 8 : 12, padding: "12px 2px" }}>
+        <div onClick={() => onView(account.id)} style={{ display: "flex", alignItems: "center", gap: narrow ? 10 : 12, flex: 1, minWidth: 0, cursor: "pointer" }}>
+          <span style={{ width: 38, height: 38, minWidth: 38, borderRadius: "50%", background: typeInfo.color + "22", color: typeInfo.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon size={17} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{account.name}</div>
+            <div style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {account.customType || typeInfo.label}{narrow ? "" : ` · Started at ${fmt(account.initialBalance)}`}
             </div>
-          )}
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <div className="mono" style={{ fontSize: 14, fontWeight: 800, whiteSpace: "nowrap" }}>{fmt(balance)}</div>
+            {delta !== 0 && (
+              <div className="mono" style={{ fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: delta >= 0 ? COLORS.green : COLORS.rose }}>
+                {delta >= 0 ? "+" : "−"}{fmt(Math.abs(delta))}
+              </div>
+            )}
+          </div>
+          {!narrow && <ChevronRight size={16} style={{ color: COLORS.mutedLight, minWidth: 16 }} />}
         </div>
-        <ChevronRight size={16} style={{ color: COLORS.mutedLight, minWidth: 16 }} />
+        {narrow ? (
+          <button onClick={() => setActionsOpen((v) => !v)} aria-label="More actions" aria-expanded={actionsOpen} style={{
+            background: actionsOpen ? COLORS.orangeLight : "none", border: "none", borderRadius: 8, color: actionsOpen ? COLORS.orangeDark : COLORS.muted,
+            cursor: "pointer", padding: 6, display: "flex", flexShrink: 0
+          }}><MoreHorizontal size={18} /></button>
+        ) : (
+          <>
+            <button onClick={() => setEditing(true)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
+              <Pencil size={14} />
+            </button>
+            <button onClick={() => onRemove(account.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
+              <Trash2 size={14} />
+            </button>
+          </>
+        )}
       </div>
-      <button onClick={() => setEditing(true)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-        <Pencil size={14} />
-      </button>
-      <button onClick={() => onRemove(account.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-        <Trash2 size={14} />
-      </button>
+      {narrow && actionsOpen && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", padding: "0 2px 12px" }}>
+          <span style={{ fontSize: 11.5, color: COLORS.muted, marginRight: "auto", alignSelf: "center" }}>Started at {fmt(account.initialBalance)}</span>
+          <button onClick={() => { setActionsOpen(false); onView(account.id); }} style={{ ...barBtn, color: COLORS.text }}><ChevronRight size={14} /> Open</button>
+          <button onClick={() => { setActionsOpen(false); setEditing(true); }} style={{ ...barBtn, color: COLORS.text }}><Pencil size={14} /> Edit</button>
+          <button onClick={() => onRemove(account.id)} style={{ ...barBtn, color: COLORS.rose, borderColor: withAlpha(COLORS.rose, "55") }}><Trash2 size={14} /> Delete</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -2532,11 +2623,10 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
           <div>
             <FieldLabel>Amount (RM){shared ? " — your share, auto-calculated" : ""}</FieldLabel>
-            <input type="text" inputMode="decimal" placeholder="0.00" value={shared ? (yourShare !== null ? yourShare.toFixed(2) : "") : form.amount}
+            <MoneyInput value={shared ? (yourShare !== null ? yourShare : "") : form.amount}
               disabled={shared}
-              onChange={(e) => setForm((f) => ({ ...f, amount: formatCentsInput(e.target.value) }))}
-              onFocus={(e) => e.target.select()}
-              style={{ width: "100%", boxSizing: "border-box", opacity: shared ? 0.6 : 1 }} className="mono" />
+              onChange={(v) => setForm((f) => ({ ...f, amount: v }))}
+              style={{ width: "100%", boxSizing: "border-box", opacity: shared ? 0.6 : 1 }} />
           </div>
           <div>
             <FieldLabel>Date</FieldLabel>
@@ -2590,8 +2680,8 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
             {shared && (
               <div style={{ marginTop: 10, background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 12, padding: 12 }}>
                 <FieldLabel>Total Cost (RM)</FieldLabel>
-                <input type="number" min="0" step="0.01" placeholder="0.00" value={sharedTotal} onChange={(e) => setSharedTotal(e.target.value)}
-                  style={{ width: "100%", boxSizing: "border-box", marginBottom: 12 }} className="mono" />
+                <MoneyInput value={sharedTotal} onChange={setSharedTotal}
+                  style={{ width: "100%", boxSizing: "border-box", marginBottom: 12 }} />
 
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                   <FieldLabel>Who owes you</FieldLabel>
@@ -2603,9 +2693,9 @@ function AddTransaction({ onAdd, preset, accounts, quickAdds, onAddQuickAdd, onU
                 </div>
 
                 {debtors.map((d) => (
-                  <div key={d.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr auto", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                    <input type="text" placeholder="Name" value={d.name} onChange={(e) => updateDebtorRow(d.id, { name: e.target.value })} style={{ fontSize: 13 }} />
-                    <input type="number" min="0" step="0.01" placeholder="0.00" value={d.amount} onChange={(e) => updateDebtorRow(d.id, { amount: e.target.value })} style={{ fontSize: 13 }} className="mono" />
+                  <div key={d.id} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr) auto", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                    <input type="text" placeholder="Name" value={d.name} onChange={(e) => updateDebtorRow(d.id, { name: e.target.value })} style={{ fontSize: 13, width: "100%", boxSizing: "border-box", minWidth: 0 }} />
+                    <MoneyInput value={d.amount} onChange={(v) => updateDebtorRow(d.id, { amount: v })} style={{ fontSize: 13, width: "100%", boxSizing: "border-box", minWidth: 0 }} />
                     <button onClick={() => removeDebtorRow(d.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
                       <Trash2 size={14} />
                     </button>
@@ -2666,17 +2756,17 @@ function QuickAddEditor({ quickAdds, onUpdate, onRemove, onAdd, categories, acco
               <Trash2 size={15} />
             </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: accounts.length > 0 ? "0.8fr 1.2fr 1fr" : "0.8fr 1.2fr", gap: 8 }}>
+          <div className="mgrid-2" style={{ display: "grid", gridTemplateColumns: accounts.length > 0 ? "0.8fr 1.2fr 1fr" : "0.8fr 1.2fr", gap: 8 }}>
             <div>
               <FieldLabel>Amount (RM)</FieldLabel>
-              <input type="number" min="0" step="0.01" value={q.amount} onChange={(e) => onUpdate(q.id, { amount: parseFloat(e.target.value) || 0 })} style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5 }} className="mono" />
+              <MoneyInput value={q.amount || ""} onChange={(v) => onUpdate(q.id, { amount: parseFloat(v) || 0 })} style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5 }} />
             </div>
             <div>
               <FieldLabel>Category</FieldLabel>
               <CategorySelect value={q.category} onChange={(c) => onUpdate(q.id, { category: c })} options={categories.expense} type="expense" onAddCategory={onAddCategory} />
             </div>
             {accounts.length > 0 && (
-              <div>
+              <div className="mspan">
                 <FieldLabel>Account</FieldLabel>
                 <AccountSelect value={q.accountId || ""} onChange={(id) => onUpdate(q.id, { accountId: id || null })} accounts={accounts} allowUnassigned compact />
               </div>
@@ -2767,13 +2857,13 @@ function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
           <p style={{ fontSize: 12, color: COLORS.muted, marginTop: 0, marginBottom: 10 }}>
             Upload a CSV or PDF statement exported from your bank. We'll try to detect the date, amount, and description automatically, and guess a category for each row.
           </p>
-          <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5 }} />
+          <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5, width: "100%", maxWidth: "100%", boxSizing: "border-box" }} />
         </div>
       ) : rows.length === 0 ? (
         <div>
           <EmptyNote>{parseError || `Couldn't find recognizable transactions in "${fileName}". Try exporting a plain CSV with Date, Description, and Amount columns, or a text-based (not scanned) PDF statement.`}</EmptyNote>
           <div style={{ marginTop: 10 }}>
-            <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5 }} />
+            <input type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(e) => handleFile(e.target.files[0])} style={{ fontSize: 12.5, width: "100%", maxWidth: "100%", boxSizing: "border-box" }} />
           </div>
         </div>
       ) : (
@@ -2790,12 +2880,12 @@ function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
             <div>
               <FieldLabel>From</FieldLabel>
               <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text }} />
+                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text, maxWidth: "100%", boxSizing: "border-box" }} />
             </div>
             <div>
               <FieldLabel>To</FieldLabel>
               <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text }} />
+                style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid " + COLORS.border, fontSize: 12, background: COLORS.card, color: COLORS.text, maxWidth: "100%", boxSizing: "border-box" }} />
             </div>
             {hasRange && (
               <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ background: "none", border: "none", color: COLORS.orange, fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "6px 0" }}>
@@ -2815,7 +2905,7 @@ function CsvImporter({ categories, accounts, quickAdds, onImport, onClose }) {
           ) : (
             <div style={{ maxHeight: 340, overflowY: "auto", border: "1px solid " + COLORS.border, borderRadius: 10 }}>
               {visibleRows.map((r, pos) => (
-                <div key={r._idx} style={{
+                <div key={r._idx} className="csv-row" style={{
                   display: "grid", gridTemplateColumns: "18px 82px 64px 1fr 108px", gap: 8, alignItems: "center",
                   padding: "8px 10px", borderBottom: pos < visibleRows.length - 1 ? "1px solid " + COLORS.border : "none",
                   opacity: r.include ? 1 : 0.45
@@ -2879,7 +2969,7 @@ function CustomRangePicker({ from, to, onChange }) {
   const dayCount = from && to ? Math.round((parseLocal(to) - parseLocal(from)) / 86400000) + 1 : null;
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+      <div className="mgrid-1" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
         <div>
           <FieldLabel>From</FieldLabel>
           <input type="date" value={from} max={to || undefined} onChange={(e) => set({ from: e.target.value })} style={{ width: "100%", boxSizing: "border-box" }} />
@@ -3014,7 +3104,7 @@ function Ledger({ entries, catGroups, onRemove, onUpdate, onToggleBudget, onBulk
       {filtersOpen && (
         <div className="nav-dropdown" style={{ background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 14, padding: 14, marginBottom: 14 }}>
           <FieldLabel>Period</FieldLabel>
-          <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 12 : 10 }}>
+          <div className="pill-row" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: periodType === "all" ? 12 : 10 }}>
             {[["all", "All Time"], ["day", "Day"], ["week", "Week"], ["month", "Month"], ["custom", "Custom"]].map(([id, label]) => (
               <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
                 flex: 1, padding: "8px 6px", borderRadius: 9, border: "1px solid " + (periodType === id ? COLORS.orange : COLORS.border),
@@ -3336,7 +3426,7 @@ function Insights({ entries, accounts, groups }) {
   return (
     <div>
       <SectionCard title="View By" tour="insights-view">
-        <div style={{ display: "flex", gap: 6, marginBottom: periodType === "all" ? 0 : 16 }}>
+        <div className="pill-row" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: periodType === "all" ? 0 : 16 }}>
           {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["custom", "Custom"], ["all", "All Time"]].map(([id, label]) => (
             <button key={id} onClick={() => { setPeriodType(id); setAnchor(new Date()); }} style={{
               flex: 1, padding: "9px 8px", borderRadius: 10, border: "1px solid " + (periodType === id ? COLORS.orange : COLORS.border),
@@ -3379,7 +3469,7 @@ function Insights({ entries, accounts, groups }) {
           <ComposedChart data={trend} margin={{ top: 6, right: 10, bottom: 0, left: -14 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
             <XAxis dataKey="label" stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={44} />
+            <YAxis tickFormatter={compactTick} stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={44} />
             <Tooltip contentStyle={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, fontSize: 12 }} formatter={(v) => fmt(v)} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             {chartView !== "expense" && <Bar dataKey="income" name="Income" fill={COLORS.green} radius={[5, 5, 0, 0]} barSize={14} />}
@@ -3436,7 +3526,7 @@ function Insights({ entries, accounts, groups }) {
             {catView === "group" && <span style={{ fontSize: 11, color: COLORS.mutedLight, alignSelf: "center" }}>Tap a group to see what's inside</span>}
           </div>
         )}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))", gap: 10, marginBottom: 20 }}>
           <SummaryCard icon={<Wallet size={16} />} label={breakdownType === "expense" ? "Avg Daily Spend" : "Avg Daily Income"} value={fmt(avgPerDay)} color={COLORS.orange} />
           <SummaryCard icon={breakdownType === "expense" ? <TrendingUp size={16} /> : <TrendingDown size={16} />} label={breakdownType === "expense" ? "Income" : "Expenses"} value={fmt(breakdownType === "expense" ? incomeTotal : expenseTotal)} color={breakdownType === "expense" ? COLORS.green : COLORS.rose} />
           <SummaryCard icon={<Target size={16} />} label={groupBy === "account" ? "Top Account" : (breakdownType === "expense" ? "Top Expense Category" : "Top Income Source")} value={pieData[0] ? pieData[0].name : "—"} color={COLORS.blue} sub={pieData[0] ? fmt(pieData[0].value) : null} />
@@ -3446,8 +3536,8 @@ function Insights({ entries, accounts, groups }) {
         {pieData.length === 0 ? (
           <EmptyNote>No {breakdownType === "expense" ? "expenses" : "income"} recorded in this period.</EmptyNote>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 22, alignItems: "center" }}>
-            <div style={{ position: "relative", width: 170, height: 170 }}>
+          <div className="mgrid-1" style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 22, alignItems: "center" }}>
+            <div className="pie-wrap" style={{ position: "relative", width: 170, height: 170 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={80} paddingAngle={2}>
@@ -3527,10 +3617,10 @@ function Insights({ entries, accounts, groups }) {
           <div style={{ height: 16 }} />
           <SectionCard title="Spending by Day of Week">
             <ResponsiveContainer width="100%" height={160}>
-              <BarChart data={weekdayData} margin={{ top: 6, right: 10, bottom: 0, left: -20 }}>
+              <BarChart data={weekdayData} margin={{ top: 6, right: 6, bottom: 0, left: -8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
                 <XAxis dataKey="label" stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={40} />
+                <YAxis tickFormatter={compactTick} stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={40} />
                 <Tooltip contentStyle={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, fontSize: 12 }} formatter={(v) => fmt(v)} />
                 <Bar dataKey="value" fill={COLORS.orange} radius={[5, 5, 0, 0]} />
               </BarChart>
@@ -3603,6 +3693,7 @@ function BudgetRing({ pct, color, size = 76, stroke = 8 }) {
 // an expandable list of the transactions that make up the total. With no limit
 // set it turns into a small "set a limit" prompt (used for master budgets).
 function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel, transactions, onSet, onRemove, emptyHint }) {
+  const narrow = useIsNarrow();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(lim || "");
   const [showTx, setShowTx] = useState(false);
@@ -3629,7 +3720,7 @@ function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel,
   return (
     <div style={{ background: COLORS.bg, borderRadius: 16, padding: 14, border: "1px solid " + (status === "over" ? withAlpha(COLORS.rose, "55") : COLORS.border) }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        <BudgetRing pct={pct} color={color} />
+        <BudgetRing pct={pct} color={color} size={narrow ? 60 : 76} stroke={narrow ? 7 : 8} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
             {dotColor && <span style={{ width: 9, height: 9, borderRadius: 3, background: dotColor, flexShrink: 0 }} />}
@@ -3638,8 +3729,8 @@ function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel,
           {subtitle && <div style={{ fontSize: 11, color: COLORS.mutedLight, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</div>}
           {editing || !hasLimit ? (
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-              <input type="number" min="0" step="1" placeholder={isGoal ? "RM target" : "RM limit"} value={val} onChange={(e) => setVal(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") save(); }} style={{ width: 96, padding: "5px 8px", fontSize: 12.5, boxSizing: "border-box" }} className="mono" />
+              <MoneyInput placeholder={isGoal ? "RM target" : "RM limit"} value={val} onChange={setVal}
+                onKeyDown={(e) => { if (e.key === "Enter") save(); }} style={{ flex: 1, minWidth: 0, maxWidth: 130, padding: "5px 8px", fontSize: 12.5, boxSizing: "border-box" }} />
               <button onClick={save} style={{ background: COLORS.orange, color: "#fff", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Save</button>
               {editing && <button onClick={() => { setEditing(false); setVal(lim || ""); }} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, padding: "5px 9px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: COLORS.muted }}>✕</button>}
             </div>
@@ -3691,9 +3782,16 @@ function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel,
 // "Custom" view on the Budgets page: pick any From/To dates and see what was
 // spent (or earned) per category/group in that window, for viewing only — no
 // limits are applied to it. Categories that have a budget are tagged.
-function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome }) {
-  const [from, setFrom] = useState(() => defaultCustomRange().from);
-  const [to, setTo] = useState(() => defaultCustomRange().to);
+function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome, from: fromProp, to: toProp, onRangeChange, maxRows }) {
+  // Uncontrolled on the Budgets page; the dashboard passes from/to/onRangeChange
+  // so its chosen range is saved with the rest of the user's data.
+  const [fromState, setFromState] = useState(() => defaultCustomRange().from);
+  const [toState, setToState] = useState(() => defaultCustomRange().to);
+  const controlled = typeof onRangeChange === "function";
+  const from = controlled ? fromProp : fromState;
+  const to = controlled ? toProp : toState;
+  const setRange = (r) => { if (controlled) onRangeChange(r); else { setFromState(r.from); setToState(r.to); } };
+  const [showAll, setShowAll] = useState(false);
   const [open, setOpen] = useState({});
   const range = customRange(from, to);
 
@@ -3721,7 +3819,7 @@ function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome 
 
   return (
     <div>
-      <CustomRangePicker from={from} to={to} onChange={(r) => { setFrom(r.from); setTo(r.to); }} />
+      <CustomRangePicker from={from} to={to} onChange={setRange} />
       <div style={{ fontSize: 11, color: COLORS.mutedLight, margin: "10px 0 14px" }}>
         For viewing only — this shows what you {isIncome ? "earned" : "spent"} in these dates and doesn't compare against your limits.
       </div>
@@ -3738,7 +3836,7 @@ function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome 
       </div>
       {rows.length === 0 ? (
         <EmptyNote>No {isIncome ? "income" : "expenses"} in this date range.</EmptyNote>
-      ) : rows.map((r) => {
+      ) : (maxRows && !showAll ? rows.slice(0, maxRows) : rows).map((r) => {
         const pct = total > 0 ? (r.total / total) * 100 : 0;
         const isOpen = !!open[r.name];
         const color = catColor(r.name);
@@ -3776,6 +3874,12 @@ function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome 
           </div>
         );
       })}
+      {maxRows && rows.length > maxRows && (
+        <button onClick={() => setShowAll((v) => !v)} style={{
+          marginTop: 2, width: "100%", background: "none", border: "1px dashed " + COLORS.border, borderRadius: 999,
+          padding: "7px 12px", fontSize: 12, fontWeight: 700, color: COLORS.muted, cursor: "pointer"
+        }}>{showAll ? "Show fewer" : `Show all ${rows.length}`}</button>
+      )}
     </div>
   );
 }
@@ -3893,7 +3997,7 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
 
       {/* Summary */}
       <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} tour="budgets-overview" icon={<Target size={13} />} right={
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {[...BUDGET_PERIODS, "custom"].map((pt) => (
             <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{pt === "custom" ? "Custom" : PERIOD_LABEL[pt]}</button>
           ))}
@@ -3966,8 +4070,8 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
 
       {/* Add form */}
       <SectionCard title={isIncome ? "Set an Income Goal" : "Set a Category Budget"}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
-          <div>
+        <div className="mgrid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
+          <div className="mspan">
             <FieldLabel>Category</FieldLabel>
             <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} allowGroups />
           </div>
@@ -3981,9 +4085,9 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
           </div>
           <div>
             <FieldLabel>{isIncome ? "Target (RM)" : "Limit (RM)"}</FieldLabel>
-            <input type="number" min="0" step="1" placeholder="0.00" value={limit} onChange={(e) => setLimit(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} className="mono" />
+            <MoneyInput value={limit} onChange={setLimit} style={{ width: "100%", boxSizing: "border-box" }} />
           </div>
-          <button onClick={submitBudget} style={{
+          <button onClick={submitBudget} className="mspan" style={{
             background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10,
             padding: "9px 16px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", height: 39
           }}>Set</button>
@@ -4094,7 +4198,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
           </div>
           <div>
             <FieldLabel>Amount (RM)</FieldLabel>
-            <input type="number" min="0" step="0.01" placeholder="0.00" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} style={{ width: "100%", boxSizing: "border-box" }} className="mono" />
+            <MoneyInput value={form.amount} onChange={(v) => setForm((f) => ({ ...f, amount: v }))} style={{ width: "100%", boxSizing: "border-box" }} />
           </div>
           <div>
             <FieldLabel>Category</FieldLabel>
@@ -4159,6 +4263,7 @@ function Recurring({ recurring, onAdd, onUpdate, onToggle, onRemove, onRunNow, c
 }
 
 function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categories, onAddCategory, accounts }) {
+  const narrow = useIsNarrow();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: r.name, amount: r.amount, type: r.type, category: r.category, categoryLabel: r.categoryLabel || "", frequency: r.frequency || "monthly", day: r.day, accountId: r.accountId || "", endDate: r.endDate || "" });
 
@@ -4192,9 +4297,9 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
             }}>{t}</button>
           ))}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <div className="grid-fill" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginBottom: 8 }}>
           <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={{ fontSize: 13 }} />
-          <input type="number" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} style={{ fontSize: 13 }} className="mono" />
+          <MoneyInput value={form.amount} onChange={(v) => setForm((f) => ({ ...f, amount: v }))} style={{ fontSize: 13, width: "100%", boxSizing: "border-box", minWidth: 0 }} />
           <CategorySelect value={form.category} onChange={(c) => setForm((f) => ({ ...f, category: c, categoryLabel: "" }))}
             options={form.type === "expense" ? categories.expense : categories.income} type={form.type} onAddCategory={onAddCategory} compact />
           <select value={form.frequency} onChange={(e) => setForm((f) => ({ ...f, frequency: e.target.value, day: 1 }))} style={{ fontSize: 13 }}>
@@ -4242,36 +4347,61 @@ function RecurringRow({ r, onUpdate, onToggle, onRemove, onRunNow, isLast, categ
   const runTitle = ended ? "This recurring item has ended" : !r.active ? "Resume it first to log early" : alreadyRun ? "Already logged this period" : "Log it today, ahead of its due date";
   const endText = r.endDate ? (ended ? ` · Ended ${formatDateRange(r.endDate, r.endDate)}` : ` · Ends ${formatDateRange(r.endDate, r.endDate)}`) : "";
 
+  const amountEl = (
+    <div className="mono" style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0, color: r.type === "income" ? COLORS.green : COLORS.text }}>
+      {r.type === "income" ? "+" : "−"}{fmt(r.amount)}
+    </div>
+  );
+  const actionsEl = (
+    <>
+      <button onClick={() => !runDisabled && onRunNow(r.id)} disabled={runDisabled} title={runTitle} aria-label="Log it today" style={{
+        background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
+        color: runDisabled ? COLORS.mutedLight : COLORS.blue, opacity: runDisabled ? 0.5 : 1,
+        cursor: runDisabled ? "not-allowed" : "pointer", padding: narrow ? "7px 9px" : "5px 7px", display: "flex"
+      }}><Zap size={13} /></button>
+      <button onClick={() => setEditing(true)} aria-label="Edit" style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.muted, cursor: "pointer", padding: narrow ? "7px 9px" : "5px 7px", display: "flex" }}>
+        <Pencil size={13} />
+      </button>
+      <button onClick={() => onToggle(r.id)} title={r.active ? "Pause" : "Resume"} aria-label={r.active ? "Pause" : "Resume"} style={{
+        background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: r.active ? COLORS.green : COLORS.mutedLight,
+        cursor: "pointer", padding: narrow ? "7px 9px" : "5px 7px", display: "flex"
+      }}><Power size={13} /></button>
+      <button onClick={() => onRemove(r.id)} aria-label="Delete" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex", padding: narrow ? 7 : 0 }}>
+        <Trash2 size={14} />
+      </button>
+    </>
+  );
+  const details = (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 5, marginTop: 2 }}>
+      <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(r.category), marginTop: 5, flexShrink: 0 }} />
+      <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}{linkedAccount ? ` · ${linkedAccount.name}` : ""}{endText}</span>
+    </div>
+  );
+
+  if (narrow) {
+    return (
+      <div style={{ padding: "12px 2px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border, opacity: r.active && !ended ? 1 : 0.45 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
+          {amountEl}
+        </div>
+        {details}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>{actionsEl}</div>
+      </div>
+    );
+  }
+
   return (
     <div style={{
       display: "grid", gridTemplateColumns: "1fr auto auto auto auto auto", alignItems: "center", gap: 8,
       padding: "11px 4px", borderBottom: isLast ? "none" : "1px solid " + COLORS.border, opacity: r.active && !ended ? 1 : 0.45
     }}>
-      <div>
+      <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13.5, fontWeight: 700 }}>{r.name}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1, flexWrap: "wrap" }}>
-          <span style={{ width: 6, height: 6, borderRadius: 2, background: catColor(r.category) }} />
-          <span style={{ fontSize: 11, color: COLORS.muted }}>{categoryDisplay} · {freqLabel}{linkedAccount ? ` · ${linkedAccount.name}` : ""}{endText}</span>
-        </div>
+        {details}
       </div>
-      <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: r.type === "income" ? COLORS.green : COLORS.text }}>
-        {r.type === "income" ? "+" : "−"}{fmt(r.amount)}
-      </div>
-      <button onClick={() => !runDisabled && onRunNow(r.id)} disabled={runDisabled} title={runTitle} style={{
-        background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
-        color: runDisabled ? COLORS.mutedLight : COLORS.blue, opacity: runDisabled ? 0.5 : 1,
-        cursor: runDisabled ? "not-allowed" : "pointer", padding: "5px 7px", display: "flex"
-      }}><Zap size={13} /></button>
-      <button onClick={() => setEditing(true)} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: COLORS.muted, cursor: "pointer", padding: "5px 7px", display: "flex" }}>
-        <Pencil size={13} />
-      </button>
-      <button onClick={() => onToggle(r.id)} title={r.active ? "Pause" : "Resume"} style={{
-        background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8, color: r.active ? COLORS.green : COLORS.mutedLight,
-        cursor: "pointer", padding: "5px 7px", display: "flex"
-      }}><Power size={13} /></button>
-      <button onClick={() => onRemove(r.id)} style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", display: "flex" }}>
-        <Trash2 size={14} />
-      </button>
+      {amountEl}
+      {actionsEl}
     </div>
   );
 }
@@ -4609,7 +4739,7 @@ function CategoryManager({ categories, entries, onRename, onDelete, onAddCategor
           <span style={{ fontSize: 11, color: COLORS.mutedLight, whiteSpace: "nowrap" }}>{usageCount(c)} used</span>
           {groupApi && g.parents.length > 0 && (
             <select value={g.map[c] || ""} onChange={(e) => groupApi.onSetParent(typeTab, c, e.target.value || null)}
-              aria-label={`Group for ${c}`} style={{ fontSize: 11.5, padding: "4px 6px", maxWidth: 120 }}>
+              aria-label={`Group for ${c}`} className="cat-group-select" style={{ fontSize: 11.5, padding: "4px 6px", maxWidth: 120 }}>
               <option value="">No group</option>
               {g.parents.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
@@ -5049,8 +5179,8 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
 
   return (
     <div style={{ padding: "12px 8px", marginBottom: 6, background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 12 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-        <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ fontSize: 13 }} className="mono" />
+      <div className="grid-fill" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, marginBottom: 8 }}>
+        <MoneyInput value={amount} onChange={setAmount} style={{ fontSize: 13, width: "100%", boxSizing: "border-box", minWidth: 0 }} />
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ fontSize: 13 }} />
         {isTransfer ? (
           <>
@@ -5088,8 +5218,14 @@ function EditEntryForm({ entry, categories, accounts, onSave, onCancel, onAddCat
 }
 
 function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }) {
+  const narrow = useIsNarrow();
+  const [actionsOpen, setActionsOpen] = useState(false);
   const showBudgetToggle = onToggleBudget && e.type !== "transfer" && !e.adjustment;
-  const cols = [hideDate ? null : "56px", "1fr", "auto", showBudgetToggle ? "26px" : null, onEdit ? "26px" : null, onRemove ? "26px" : null].filter(Boolean).join(" ");
+  const actionCount = [showBudgetToggle, onEdit, onRemove].filter(Boolean).length;
+  // On phones the row keeps its width for the name and amount; the actions
+  // tuck behind a "⋯" button and open as a labelled bar under the row.
+  const collapseActions = narrow && actionCount > 1;
+  const showDateCol = !hideDate && !narrow;
   const badge = debtBadgeText(e);
   const isTransfer = e.type === "transfer";
 
@@ -5104,11 +5240,31 @@ function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }
     const par = parentOf(CATEGORY_GROUPS_LIVE, e.type, e.category);
     subtitle = e.categoryLabel || (par ? `${par} › ${e.category}` : e.category);
   }
+  if (!hideDate && narrow) subtitle = `${relDateLabel(e.date)} · ${subtitle}`;
+
+  const budgetBtn = showBudgetToggle && (
+    <button onClick={() => onToggleBudget(e.id)} title={e.excludeFromBudget ? "Excluded from budget — click to include" : "In budget — click to exclude"} style={{
+      background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
+      color: e.excludeFromBudget ? COLORS.mutedLight : COLORS.green,
+      cursor: "pointer", padding: "5px 7px", display: "flex"
+    }}><Target size={13} /></button>
+  );
+  const editBtn = onEdit && (
+    <button onClick={() => onEdit(e)} aria-label="Edit entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
+      <Pencil size={14} />
+    </button>
+  );
+  const removeBtn = onRemove && (
+    <button onClick={() => onRemove(e.id)} aria-label="Delete entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
+      <Trash2 size={14} />
+    </button>
+  );
+  const barBtn = { display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, border: "1px solid " + COLORS.border, background: COLORS.card, fontSize: 12.5, fontWeight: 700, cursor: "pointer" };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: cols, alignItems: "center", gap: 10, padding: "10px 2px", borderBottom: last ? "none" : "1px solid " + COLORS.border }}>
-      {!hideDate && <div className="mono" style={{ fontSize: 11, color: COLORS.muted }}>{e.date.slice(5)}</div>}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+    <div style={{ borderBottom: last ? "none" : "1px solid " + COLORS.border }}>
+      <div style={{ display: "flex", alignItems: "center", gap: narrow ? 8 : 10, padding: "10px 2px" }}>
+        {showDateCol && <div className="mono" style={{ fontSize: 11, color: COLORS.muted, width: 46, flexShrink: 0 }}>{e.date.slice(5)}</div>}
         <span style={{
           width: 32, height: 32, minWidth: 32, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
           background: isTransfer ? COLORS.blueLight : catColor(e.category) + "22",
@@ -5116,36 +5272,40 @@ function TxRow({ e, last, onRemove, onEdit, onToggleBudget, hideDate, accounts }
         }}>
           {isTransfer ? <ArrowRightLeft size={14} /> : e.type === "income" ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
         </span>
-        <div style={{ minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
-            {badge && <Badge>{badge}</Badge>}
-            {e.recurring && <Badge>Recurring</Badge>}
-            {e.adjustment && <Badge>Adjustment</Badge>}
-            {e.excludeFromBudget && !e.adjustment && <Badge>{excludedPeriodsOf(e).length === BUDGET_PERIODS.length ? "No budget" : "No " + excludedPeriodsOf(e).join("/") + " budget"}</Badge>}
-          </div>
+          <div style={{ fontSize: 11, color: COLORS.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 }}>{subtitle}</div>
+          {(badge || e.recurring || e.adjustment || (e.excludeFromBudget && !e.adjustment)) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3, flexWrap: "wrap" }}>
+              {badge && <Badge>{badge}</Badge>}
+              {e.recurring && <Badge>Recurring</Badge>}
+              {e.adjustment && <Badge>Adjustment</Badge>}
+              {e.excludeFromBudget && !e.adjustment && <Badge>{excludedPeriodsOf(e).length === BUDGET_PERIODS.length ? "No budget" : "No " + excludedPeriodsOf(e).join("/") + " budget"}</Badge>}
+            </div>
+          )}
         </div>
+        <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: isTransfer ? COLORS.blue : e.type === "income" ? COLORS.green : COLORS.text, textAlign: "right", whiteSpace: "nowrap", flexShrink: 0 }}>
+          {isTransfer ? "⇄ " : e.type === "income" ? "+" : "−"}{fmt(e.amount)}
+        </div>
+        {collapseActions ? (
+          <button onClick={() => setActionsOpen((v) => !v)} aria-label="More actions" aria-expanded={actionsOpen} style={{
+            background: actionsOpen ? COLORS.orangeLight : "none", border: "none", borderRadius: 8, color: actionsOpen ? COLORS.orangeDark : COLORS.muted,
+            cursor: "pointer", padding: 6, display: "flex", flexShrink: 0
+          }}><MoreHorizontal size={18} /></button>
+        ) : (
+          <>{budgetBtn}{editBtn}{removeBtn}</>
+        )}
       </div>
-      <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: isTransfer ? COLORS.blue : e.type === "income" ? COLORS.green : COLORS.text, textAlign: "right", whiteSpace: "nowrap" }}>
-        {isTransfer ? "⇄ " : e.type === "income" ? "+" : "−"}{fmt(e.amount)}
-      </div>
-      {showBudgetToggle && (
-        <button onClick={() => onToggleBudget(e.id)} title={e.excludeFromBudget ? "Excluded from budget — click to include" : "In budget — click to exclude"} style={{
-          background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 8,
-          color: e.excludeFromBudget ? COLORS.mutedLight : COLORS.green,
-          cursor: "pointer", padding: "5px 7px", display: "flex"
-        }}><Target size={13} /></button>
-      )}
-      {onEdit && (
-        <button onClick={() => onEdit(e)} aria-label="Edit entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
-          <Pencil size={14} />
-        </button>
-      )}
-      {onRemove && (
-        <button onClick={() => onRemove(e.id)} aria-label="Delete entry" style={{ background: "none", border: "none", color: COLORS.mutedLight, cursor: "pointer", padding: 4, display: "flex" }}>
-          <Trash2 size={14} />
-        </button>
+      {collapseActions && actionsOpen && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", padding: "0 2px 10px" }}>
+          {showBudgetToggle && (
+            <button onClick={() => onToggleBudget(e.id)} style={{ ...barBtn, color: e.excludeFromBudget ? COLORS.muted : COLORS.green }}>
+              <Target size={14} /> {e.excludeFromBudget ? "Count in budget" : "Exclude from budget"}
+            </button>
+          )}
+          {onEdit && <button onClick={() => { setActionsOpen(false); onEdit(e); }} style={{ ...barBtn, color: COLORS.text }}><Pencil size={14} /> Edit</button>}
+          {onRemove && <button onClick={() => onRemove(e.id)} style={{ ...barBtn, color: COLORS.rose, borderColor: withAlpha(COLORS.rose, "55") }}><Trash2 size={14} /> Delete</button>}
+        </div>
       )}
     </div>
   );
@@ -5160,7 +5320,7 @@ const TOAST_STYLES = {
 function ToastStack({ toasts, onDismiss }) {
   if (!toasts.length) return null;
   return (
-    <div style={{
+    <div className="toast-stack" style={{
       position: "fixed", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 300,
       display: "flex", flexDirection: "column", gap: 8, width: "100%", maxWidth: 380,
       padding: "0 14px", boxSizing: "border-box", pointerEvents: "none"
@@ -5210,11 +5370,11 @@ function StatRow({ icon, color, label, value }) {
 
 function SummaryCard({ icon, label, value, color, sub }) {
   return (
-    <div style={{ background: COLORS.bg, borderRadius: 14, padding: "14px 15px" }}>
+    <div style={{ background: COLORS.bg, borderRadius: 14, padding: "12px 13px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLORS.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8, fontWeight: 700 }}>
         <span style={{ color }}>{icon}</span>{label}
       </div>
-      <div className="mono" style={{ fontSize: 17, fontWeight: 800, color: COLORS.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</div>
+      <div className="mono" style={{ fontSize: "clamp(14px, 4.4vw, 17px)", fontWeight: 800, color: COLORS.text, overflowWrap: "anywhere", lineHeight: 1.25 }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
     </div>
   );
@@ -5223,8 +5383,8 @@ function SummaryCard({ icon, label, value, color, sub }) {
 function SectionCard({ title, icon, right, children, collapsible, open, onToggle, tour }) {
   if (collapsible) {
     return (
-      <div data-tour={tour} style={{ background: COLORS.card, borderRadius: 20, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
-        <button type="button" onClick={onToggle} aria-expanded={!!open} style={{
+      <div data-tour={tour} className="section-card-collapsible" style={{ background: COLORS.card, borderRadius: 20, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+        <button type="button" className="section-card-head" onClick={onToggle} aria-expanded={!!open} style={{
           display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "none", cursor: "pointer",
           padding: "16px 18px", textAlign: "left", color: COLORS.muted
         }}>
@@ -5233,12 +5393,12 @@ function SectionCard({ title, icon, right, children, collapsible, open, onToggle
           </span>
           <ChevronDown size={16} style={{ marginLeft: "auto", flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
         </button>
-        {open && <div style={{ padding: "0 18px 18px" }}>{children}</div>}
+        {open && <div className="section-card-body" style={{ padding: "0 18px 18px" }}>{children}</div>}
       </div>
     );
   }
   return (
-    <div data-tour={tour} style={{ background: COLORS.card, borderRadius: 20, padding: 18, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+    <div data-tour={tour} className="section-card" style={{ background: COLORS.card, borderRadius: 20, padding: 18, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
           {icon}{title}
@@ -5594,6 +5754,54 @@ function CategorySelect({ value, onChange, options, type, onAddCategory, compact
   );
 }
 
+// Money field used everywhere an amount is typed: digits fill in from the
+// right with the decimal placed automatically (type 1234 -> 12.34), the
+// number keypad opens on phones, and the whole value is selected on focus so
+// typing replaces it. `value` may be a number or a string; onChange gets a
+// string like "12.34" (or "" when cleared). `allowNegative` adds a ± toggle
+// for balances that can be below zero, since phone keypads have no minus key.
+function MoneyInput({ value, onChange, allowNegative, placeholder = "0.00", style, className = "mono", disabled, autoFocus, onKeyDown, ariaLabel }) {
+  const [negPending, setNegPending] = useState(false);
+  const num = value === "" || value == null ? null : Number(value);
+  const valid = num != null && !isNaN(num);
+  const display = valid ? num.toFixed(2) : "";
+  const isNeg = allowNegative && (valid ? num < 0 : negPending);
+
+  const emit = (digitsStr, negative) => {
+    if (!digitsStr) { onChange(""); return; }
+    onChange(negative && Number(digitsStr) !== 0 ? "-" + digitsStr : digitsStr);
+  };
+  const handle = (e) => {
+    const raw = e.target.value;
+    let negative = isNeg;
+    // Typing "-" on a keyboard flips the sign too.
+    if (allowNegative && (raw.match(/-/g) || []).length !== (display.match(/-/g) || []).length) negative = !negative;
+    const formatted = formatCentsInput(raw);
+    if (!formatted) setNegPending(negative);
+    emit(formatted, negative);
+  };
+  const flip = () => {
+    if (!valid || num === 0) { setNegPending((v) => !v); return; }
+    onChange((-num).toFixed(2));
+  };
+
+  const input = (
+    <input type="text" inputMode="decimal" autoComplete="off" placeholder={placeholder} aria-label={ariaLabel}
+      value={display} onChange={handle} onFocus={(e) => e.target.select()} disabled={disabled} autoFocus={autoFocus} onKeyDown={onKeyDown}
+      style={allowNegative ? { ...style, width: undefined, flex: 1, minWidth: 0 } : style} className={className} />
+  );
+  if (!allowNegative) return input;
+  return (
+    <div style={{ display: "flex", gap: 6, width: (style && style.width) || "100%", marginBottom: style && style.marginBottom }}>
+      <button type="button" onClick={flip} disabled={disabled} aria-label={isNeg ? "Make positive" : "Make negative"} title="Switch between positive and negative" style={{
+        flexShrink: 0, minWidth: 42, borderRadius: 10, border: "1px solid " + (isNeg ? COLORS.rose : COLORS.border),
+        background: isNeg ? COLORS.roseLight : COLORS.card, color: isNeg ? COLORS.rose : COLORS.muted, fontWeight: 800, fontSize: 15, cursor: "pointer"
+      }}>{isNeg ? "−" : "+"}</button>
+      {input}
+    </div>
+  );
+}
+
 function FieldLabel({ children }) {
   return <div style={{ fontSize: 11, color: COLORS.muted, marginBottom: 5, fontWeight: 600 }}>{children}</div>;
 }
@@ -5632,7 +5840,15 @@ function GlobalStyle() {
         transition: opacity .15s ease, transform .12s cubic-bezier(0.4,0,0.2,1), box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease;
         -webkit-tap-highlight-color: transparent;
       }
-      button:hover { opacity: 0.88; }
+      @media (hover: hover) { button:hover { opacity: 0.88; } }
+      html { -webkit-text-size-adjust: 100%; }
+      .app-root { overflow-x: clip; padding-top: calc(22px + env(safe-area-inset-top)) !important; padding-bottom: calc(60px + env(safe-area-inset-bottom)) !important; }
+      .toast-stack { top: calc(14px + env(safe-area-inset-top)) !important; }
+      .sidebar-drawer { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+      input[type="date"] { min-height: 40px; min-width: 0; }
+      .grid-fill > input, .grid-fill > select { width: 100%; box-sizing: border-box; min-width: 0; }
+      input[type="date"]::-webkit-date-and-time-value { text-align: left; }
+      .recharts-wrapper, .recharts-surface { max-width: 100%; }
       button:active { transform: scale(0.94); }
       .nav-dropdown { animation: dropdownIn .12s ease-out; transform-origin: top left; }
       @keyframes dropdownIn { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
@@ -5662,6 +5878,25 @@ function GlobalStyle() {
       @media (max-width: 767px) {
         .mobile-menu-btn { display: flex; align-items: center; justify-content: center; }
         .nav-top-bar { display: none !important; }
+        /* 16px stops iPhone Safari zooming in whenever a field is tapped. */
+        input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px !important; }
+      }
+      @media (max-width: 560px) {
+        .mgrid-1 { grid-template-columns: minmax(0, 1fr) !important; }
+        .mgrid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; }
+        .mgrid-1 > *, .mgrid-2 > * { min-width: 0; }
+        .csv-row { grid-template-columns: 18px minmax(0, 1fr) auto !important; row-gap: 6px !important; }
+        .csv-row > input:not([type="checkbox"]), .csv-row > select { grid-column: 2 / -1; width: 100%; box-sizing: border-box; }
+        .cat-group-select { order: 10; flex: 1 0 calc(100% - 26px); max-width: none !important; margin-left: 24px; }
+        .mspan { grid-column: 1 / -1 !important; }
+        .pie-wrap { margin: 0 auto; }
+        .pill-row > button { flex: 1 0 auto !important; padding-left: 10px !important; padding-right: 10px !important; }
+      }
+      @media (max-width: 420px) {
+        .app-root { padding-left: 12px !important; padding-right: 12px !important; }
+        .section-card { padding: 14px !important; border-radius: 18px !important; }
+        .section-card-head { padding: 14px !important; }
+        .section-card-body { padding: 0 14px 14px !important; }
       }
       @media (min-width: 768px) {
         .sidebar-drawer, .sidebar-backdrop { display: none !important; }
