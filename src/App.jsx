@@ -1732,7 +1732,15 @@ function Dashboard({ entries, watchPrefs, onSetWatchPrefs, showChecklist, onDism
           return (
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 12 }}>
               <button onClick={() => onSetWatchPrefs({ watchMode: "current" })} style={pillStyle(wp.watchMode !== "custom", COLORS.orangeDark, COLORS.orangeLight)}>Current periods</button>
-              <button onClick={toCustom} style={pillStyle(wp.watchMode === "custom", COLORS.orangeDark, COLORS.orangeLight)}>Custom range</button>
+              <button
+                onClick={() => (wp.watchMode === "custom" ? onSetWatchPrefs({ watchPickerOpen: wp.watchPickerOpen === false }) : toCustom())}
+                aria-expanded={wp.watchMode === "custom" ? wp.watchPickerOpen !== false : undefined}
+                style={{ ...pillStyle(wp.watchMode === "custom", COLORS.orangeDark, COLORS.orangeLight), display: "flex", alignItems: "center", gap: 5 }}>
+                Custom range
+                {wp.watchMode === "custom" && (
+                  <ChevronDown size={12} style={{ transform: wp.watchPickerOpen !== false ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                )}
+              </button>
               {wp.watchMode === "custom" && (
                 <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
                   {[["expense", "Expense"], ["income", "Income"]].map(([id, label]) => (
@@ -3966,6 +3974,13 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
   const [period, setPeriod] = useState("monthly");
   const [limit, setLimit] = useState("");
   const [heroPeriod, setHeroPeriod] = useState("monthly");
+  const [rangePickerOpen, setRangePickerOpen] = useState(true);
+  // Tapping Custom while it's already selected folds the date picker away (and back).
+  const choosePeriod = (pt) => {
+    if (pt === "custom" && heroPeriod === "custom") { setRangePickerOpen((v) => !v); return; }
+    setHeroPeriod(pt);
+    if (pt !== "custom") setPeriod(pt);
+  };
   const [viewMode, setViewMode] = useState("status");
   const [collapsed, setCollapsed] = useState({});
 
@@ -4043,14 +4058,17 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
   const statusOrder = isIncome ? ["reached", "close", "progress"] : ["over", "near", "ok"];
   const statusCounts = statusOrder.map((s) => ({ s, n: heroItems.filter((i) => i.status === s).length }));
 
-  // Sections for the list: by status, or by category group.
+  // The overview lists the category budgets for the period it's showing,
+  // grouped by status or by category group.
+  const periodItems = items.filter((i) => i.pt === heroPeriod);
+  const countFor = (pt) => items.filter((i) => i.pt === pt).length;
   let sections;
   if (viewMode === "group" && hasGroups) {
     const parents = groups[budgetType].parents;
-    sections = parents.map((p) => ({ id: "g:" + p, title: p, color: catColor(p), items: items.filter((i) => i.parent === p) }));
-    sections.push({ id: "g:__none", title: "Ungrouped", color: COLORS.mutedLight, items: items.filter((i) => !i.parent) });
+    sections = parents.map((p) => ({ id: "g:" + p, title: p, color: catColor(p), items: periodItems.filter((i) => i.parent === p) }));
+    sections.push({ id: "g:__none", title: "Ungrouped", color: COLORS.mutedLight, items: periodItems.filter((i) => !i.parent) });
   } else {
-    sections = statusOrder.map((s) => ({ id: "s:" + s, title: BUDGET_STATUS_LABEL[s], color: budgetStatusColor(s), items: items.filter((i) => i.status === s) }));
+    sections = statusOrder.map((s) => ({ id: "s:" + s, title: BUDGET_STATUS_LABEL[s], color: budgetStatusColor(s), items: periodItems.filter((i) => i.status === s) }));
   }
   sections = sections.filter((s) => s.items.length > 0);
   const pill = (active, accent, accentLight) => ({
@@ -4075,16 +4093,25 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
       <SectionCard title={isIncome ? "Goals Overview" : "Budget Overview"} tour="budgets-overview" icon={<Target size={13} />} right={
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {[...BUDGET_PERIODS, "custom"].map((pt) => (
-            <button key={pt} onClick={() => setHeroPeriod(pt)} style={pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight)}>{pt === "custom" ? "Custom" : PERIOD_LABEL[pt]}</button>
+            <button key={pt} onClick={() => choosePeriod(pt)} aria-expanded={pt === "custom" && heroPeriod === "custom" ? rangePickerOpen : undefined}
+              style={{ ...pill(heroPeriod === pt, COLORS.orangeDark, COLORS.orangeLight), display: "flex", alignItems: "center", gap: 5 }}>
+              {pt === "custom" ? "Custom" : PERIOD_LABEL[pt]}
+              {pt !== "custom" && countFor(pt) > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 800, minWidth: 16, height: 16, padding: "0 4px", boxSizing: "border-box", borderRadius: 999, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  background: heroPeriod === pt ? COLORS.orange : COLORS.bg, color: heroPeriod === pt ? "#fff" : COLORS.muted }}>{countFor(pt)}</span>
+              )}
+              {pt === "custom" && heroPeriod === "custom" && (
+                <ChevronDown size={12} style={{ transform: rangePickerOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+              )}
+            </button>
           ))}
         </div>
       }>
         {heroPeriod === "custom" ? (
           <BudgetRangeView entries={entries} groups={groups} budgetType={budgetType} isIncome={isIncome}
-            budgetedNames={new Set(Object.keys(groupBudgets).filter((k) => Object.keys(groupBudgets[k]).length > 0))} />
-        ) : !heroHas ? (
-          <EmptyNote>No {heroPeriod} {isIncome ? "goals" : "budgets"} set yet. Add one below to see your overview.</EmptyNote>
-        ) : (
+            budgetedNames={new Set(Object.keys(groupBudgets).filter((k) => Object.keys(groupBudgets[k]).length > 0))}
+            pickerOpen={rangePickerOpen} onTogglePicker={() => setRangePickerOpen((v) => !v)} />
+        ) : !heroHas ? null : (
           <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
             <BudgetRing pct={heroPct} color={heroColor} size={104} stroke={10} />
             <div style={{ flex: 1, minWidth: 180 }}>
@@ -4112,75 +4139,26 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
             </div>
           </div>
         )}
-      </SectionCard>
-
-      <div style={{ height: 16 }} />
-
-      {/* Master budget */}
-      <SectionCard title={isIncome ? "Master Income Goal" : "Master Budget"} icon={<Target size={13} />}>
-        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-          {isIncome
-            ? "An overall earnings target across all income categories combined — sits above the per-category goals below."
-            : "An overall spending ceiling across all categories combined — sits above the per-category budgets below."}
-        </div>
-        <div style={cardGrid}>
-          {BUDGET_PERIODS.map((pt) => (
-            <BudgetCard
-              key={pt + budgetType}
-              title={PERIOD_LABEL[pt]}
-              dotColor={COLORS.orange}
-              lim={groupMaster[pt]}
-              spent={masterPeriodInfo[pt].spent}
-              isGoal={isIncome}
-              rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
-              transactions={masterPeriodInfo[pt].transactions}
-              onSet={(val) => onSetMasterBudget(budgetType, pt, val)}
-              onRemove={() => onRemoveMasterBudget(budgetType, pt)}
-              emptyHint={`No ${PERIOD_LABEL[pt].toLowerCase()} ${isIncome ? "goal" : "ceiling"} set.`}
-            />
-          ))}
-        </div>
-      </SectionCard>
-
-      <div style={{ height: 16 }} />
-
-      {/* Add form */}
-      <SectionCard title={isIncome ? "Set an Income Goal" : "Set a Category Budget"}>
-        <div className="mgrid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
-          <div className="mspan">
-            <FieldLabel>Category</FieldLabel>
-            <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} allowGroups />
-          </div>
-          <div>
-            <FieldLabel>Period</FieldLabel>
-            <select value={period} onChange={(e) => setPeriod(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-          </div>
-          <div>
-            <FieldLabel>{isIncome ? "Target (RM)" : "Limit (RM)"}</FieldLabel>
-            <MoneyInput value={limit} onChange={setLimit} style={{ width: "100%", boxSizing: "border-box" }} />
-          </div>
-          <button onClick={submitBudget} className="mspan" style={{
-            background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10,
-            padding: "9px 16px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", height: 39
-          }}>Set</button>
-        </div>
-      </SectionCard>
-
-      <div style={{ height: 16 }} />
-
-      {/* List */}
-      <SectionCard title={isIncome ? "Income Goals" : "Category Budgets"} right={hasGroups && items.length > 0 && (
-        <div style={{ display: "flex", gap: 6 }}>
-          {[["status", "By status"], ["group", "By group"]].map(([id, label]) => (
-            <button key={id} onClick={() => setViewMode(id)} style={pill(viewMode === id, COLORS.blue, COLORS.blueLight)}>{label}</button>
-          ))}
-        </div>
-      )}>
-        {items.length === 0 && <EmptyNote>{isIncome ? "No income goals set yet. Add one above." : "No category budgets set yet. Add one above."}</EmptyNote>}
+        {heroPeriod !== "custom" && (
+          <div style={heroHas ? { borderTop: "1px solid " + COLORS.border, marginTop: 18, paddingTop: 16 } : {}}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              <span style={{ fontSize: 11.5, color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>
+                {PERIOD_LABEL[heroPeriod]} {isIncome ? "income goals" : "category budgets"}
+              </span>
+              {hasGroups && periodItems.length > 0 && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[["status", "By status"], ["group", "By group"]].map(([id, label]) => (
+                    <button key={id} onClick={() => setViewMode(id)} style={pill(viewMode === id, COLORS.blue, COLORS.blueLight)}>{label}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {periodItems.length === 0 && (
+              <EmptyNote>
+                No {heroPeriod} {isIncome ? "income goals" : "category budgets"} yet. Add one below.
+                {items.length > 0 && ` You have ${items.length} on other periods: switch Daily / Weekly / Monthly above to see them.`}
+              </EmptyNote>
+            )}
         {sections.map((sec, si) => {
           const isCollapsed = !!collapsed[sec.id];
           return (
@@ -4216,7 +4194,66 @@ function Budgets({ entries, groups, budgets, onSetBudget, onRemoveBudget, master
             </div>
           );
         })}
+          </div>
+        )}
       </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      {/* Add form */}
+      <SectionCard title={isIncome ? "Set an Income Goal" : "Set a Category Budget"}>
+        <div className="mgrid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
+          <div className="mspan">
+            <FieldLabel>Category</FieldLabel>
+            <CategorySelect value={cat} onChange={setCat} options={categories[budgetType]} type={budgetType} onAddCategory={onAddCategory} allowGroups />
+          </div>
+          <div>
+            <FieldLabel>Period</FieldLabel>
+            <select value={period} onChange={(e) => setPeriod(e.target.value)} style={{ width: "100%", boxSizing: "border-box" }}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+          <div>
+            <FieldLabel>{isIncome ? "Target (RM)" : "Limit (RM)"}</FieldLabel>
+            <MoneyInput value={limit} onChange={setLimit} style={{ width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <button onClick={submitBudget} className="mspan" style={{
+            background: COLORS.orange, color: "#fff", border: "none", borderRadius: 10,
+            padding: "9px 16px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", height: 39
+          }}>Set</button>
+        </div>
+      </SectionCard>
+
+      <div style={{ height: 16 }} />
+
+      {/* Master budget */}
+      <SectionCard title={isIncome ? "Master Income Goal" : "Master Budget"} icon={<Target size={13} />}>
+        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+          {isIncome
+            ? "An overall earnings target across all income categories combined — sits above the per-category goals below."
+            : "An overall spending ceiling across all categories combined — sits above the per-category budgets below."}
+        </div>
+        <div style={cardGrid}>
+          {BUDGET_PERIODS.map((pt) => (
+            <BudgetCard
+              key={pt + budgetType}
+              title={PERIOD_LABEL[pt]}
+              dotColor={COLORS.orange}
+              lim={groupMaster[pt]}
+              spent={masterPeriodInfo[pt].spent}
+              isGoal={isIncome}
+              rangeLabel={formatDateRange(masterPeriodInfo[pt].range.start, masterPeriodInfo[pt].range.end)}
+              transactions={masterPeriodInfo[pt].transactions}
+              onSet={(val) => onSetMasterBudget(budgetType, pt, val)}
+              onRemove={() => onRemoveMasterBudget(budgetType, pt)}
+              emptyHint={`No ${PERIOD_LABEL[pt].toLowerCase()} ${isIncome ? "goal" : "ceiling"} set.`}
+            />
+          ))}
+        </div>
+      </SectionCard>
+
     </div>
   );
 }
