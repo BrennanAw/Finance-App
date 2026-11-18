@@ -15,7 +15,8 @@ import {
 
 /* ---------- design tokens ---------- */
 
-const SHADOW = "0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06)";
+// Layered card shadow; swapped for a deeper one in dark mode (see buildPalette).
+let SHADOW = "0 1px 2px rgba(15,23,42,0.04), 0 2px 6px rgba(15,23,42,0.03), 0 12px 28px -12px rgba(15,23,42,0.10)";
 const DEFAULT_THEME = { mode: "light", accent: "#749961", secondaryAccent: "#3B82F6" };
 const ACCENT_PRESETS = ["#749961", "#3B82F6", "#8B5CF6", "#F43F5E", "#F59E0B", "#14B8A6", "#6366F1", "#EC4899"];
 
@@ -41,15 +42,31 @@ function withAlpha(hex, alphaHex) {
 function buildPalette(mode, accent, secondaryAccent) {
   const isDark = mode === "dark";
   const base = isDark
-    ? { bg: "#0F1115", card: "#181B21", border: "#272B33", text: "#F3F4F6", muted: "#9199A8", mutedLight: "#5B6270" }
-    : { bg: "#F4F5F7", card: "#FFFFFF", border: "#E5E7EB", text: "#111827", muted: "#6B7280", mutedLight: "#9CA3AF" };
+    ? {
+        bg: "#0B0D12", card: "#151821", border: "#262A35", text: "#F1F5F9", muted: "#97A0B2", mutedLight: "#5E6677",
+        cardBorder: "rgba(255,255,255,0.06)", inputBg: "#10131A", raised: "#1B1F29",
+        shadow: "inset 0 1px 0 rgba(255,255,255,0.04), 0 1px 2px rgba(0,0,0,0.4), 0 14px 32px -14px rgba(0,0,0,0.6)",
+        // Validated pair (dataviz CVD checks) for income vs expense marks on the dark surface.
+        chartIncome: "#1EAA5A", chartExpense: "#C2302F",
+      }
+    : {
+        bg: "#F3F4F7", card: "#FFFFFF", border: "#E6E8EC", text: "#0F172A", muted: "#64748B", mutedLight: "#94A3B8",
+        cardBorder: "rgba(15,23,42,0.06)", inputBg: "#F8FAFC", raised: "#F8FAFC",
+        shadow: "0 1px 2px rgba(15,23,42,0.04), 0 2px 6px rgba(15,23,42,0.03), 0 12px 28px -12px rgba(15,23,42,0.10)",
+        // Validated pair (dataviz CVD checks) for income vs expense marks on the light surface.
+        chartIncome: "#15803D", chartExpense: "#F87171",
+      };
 
   const tint = (hex) => isDark ? withAlpha(hex, "29") : shade(hex, 0.87);
 
   return {
     ...base,
     orange: accent,
-    orangeDark: shade(accent, -0.18),
+    // orangeDark is the accent as *text/ink* (on tints, links, active pills): darker on
+    // light surfaces, lighter on dark ones so it stays readable. accentDeep is the
+    // fixed darker step used for gradients and coloured shadows in both modes.
+    orangeDark: isDark ? shade(accent, 0.3) : shade(accent, -0.18),
+    accentDeep: shade(accent, -0.18),
     orangeLight: tint(accent),
     green: "#16A34A", greenLight: tint("#16A34A"),
     rose: "#EF4444", roseLight: tint("#EF4444"),
@@ -60,6 +77,19 @@ function buildPalette(mode, accent, secondaryAccent) {
 }
 
 let COLORS = buildPalette(DEFAULT_THEME.mode, DEFAULT_THEME.accent, DEFAULT_THEME.secondaryAccent);
+
+// Shared chart chrome: recessive hairline grid, quiet axes, card-style tooltip
+// whose text stays in text colours (series colour only on the swatch).
+function chartTooltipProps() {
+  return {
+    contentStyle: { background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 12, fontSize: 12, boxShadow: "0 10px 30px -10px rgba(0,0,0,0.25)", padding: "8px 12px" },
+    labelStyle: { color: COLORS.text, fontWeight: 700, marginBottom: 4 },
+    itemStyle: { color: COLORS.muted, padding: "1px 0" },
+    cursor: { fill: withAlpha(COLORS.muted, "14") },
+    formatter: (v) => fmt(v),
+  };
+}
+const chartAxisTick = () => ({ fill: COLORS.muted, fontSize: 11 });
 
 /* ---------- constants ---------- */
 
@@ -657,7 +687,7 @@ function suggestGroups(categories, groups) {
 
 // Budget Watch view chosen on the dashboard. Saved with the account's data so
 // it stays put (on every device) until the user changes it.
-const DEFAULT_DASHBOARD_PREFS = { watchMode: "current", watchFrom: "", watchTo: "", watchType: "expense" };
+const DEFAULT_DASHBOARD_PREFS = { watchMode: "current", watchFrom: "", watchTo: "", watchType: "expense", watchPickerOpen: true };
 
 function emptyData() {
   return {
@@ -1254,6 +1284,7 @@ export default function FinanceTracker() {
   // the moment it renders, without needing to thread it through props.
   useMemo(() => {
     Object.assign(COLORS, buildPalette(data.theme.mode, data.theme.accent, data.theme.secondaryAccent));
+    SHADOW = COLORS.shadow;
   }, [data.theme.mode, data.theme.accent, data.theme.secondaryAccent]);
 
   // Same trick for category colors: keep the module-level override map in
@@ -1299,14 +1330,17 @@ export default function FinanceTracker() {
 
   const navBtnBase = (active) => ({
     display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
-    padding: "9px 15px", borderRadius: 999, border: "none",
-    background: active ? COLORS.orange : "transparent",
+    padding: "9px 15px", borderRadius: 13, border: "none",
+    background: active ? `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.accentDeep})` : "transparent",
     color: active ? "#fff" : COLORS.muted,
+    boxShadow: active ? `0 6px 14px -6px ${withAlpha(COLORS.accentDeep, "AA")}` : "none",
     fontSize: 13, fontWeight: 700, cursor: "pointer"
   });
 
   return (
-    <div className="app-root" style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", background: COLORS.bg, color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
+    <div className="app-root" style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif",
+      background: `radial-gradient(1000px 420px at 50% -180px, ${withAlpha(COLORS.orange, data.theme.mode === "dark" ? "2E" : "24")}, transparent 70%), ${COLORS.bg}`,
+      backgroundRepeat: "no-repeat", color: COLORS.text, minHeight: "100vh", padding: "22px 16px 60px", boxSizing: "border-box", transition: "background-color .3s ease, color .3s ease" }}>
       <GlobalStyle />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {tourOpen && <TourOverlay steps={TOUR_STEPS} onSetTab={setTab} onFinish={finishTour} />}
@@ -1314,26 +1348,37 @@ export default function FinanceTracker() {
       <div style={{ maxWidth: 860, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
           <button className="mobile-menu-btn" data-tour="menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu" style={{
-            background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 9, cursor: "pointer", color: COLORS.text, boxShadow: SHADOW
+            background: COLORS.card, border: "1px solid " + COLORS.cardBorder, borderRadius: 12, padding: 10, cursor: "pointer", color: COLORS.text, boxShadow: SHADOW
           }}>
             <Menu size={18} />
           </button>
-          <div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             {data.profile.name ? (
               <>
-                <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>{greetingWord()}</div>
-                <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>{data.profile.name} 👋</h1>
+                <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>
+                  {greetingWord()} · {new Date().toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" })}
+                </div>
+                <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.02em" }}>{data.profile.name} 👋</h1>
               </>
             ) : (
               <>
                 <div style={{ fontSize: 11, letterSpacing: "0.14em", color: COLORS.muted, textTransform: "uppercase", marginBottom: 4, fontWeight: 700 }}>Finance</div>
-                <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>Personal Finance Tracker</h1>
+                <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.02em" }}>Personal Finance Tracker</h1>
               </>
             )}
           </div>
+          <button onClick={() => setTab("settings")} aria-label="Profile and settings" title="Profile & settings" style={{
+            width: 42, height: 42, borderRadius: "50%", border: "2px solid " + COLORS.card, flexShrink: 0, cursor: "pointer",
+            background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.accentDeep})`, color: "#fff", fontWeight: 800, fontSize: 16,
+            boxShadow: `0 6px 16px -6px ${withAlpha(COLORS.accentDeep, "99")}`, display: "flex", alignItems: "center", justifyContent: "center"
+          }}>{(data.profile.name || "?").trim().charAt(0).toUpperCase() || "?"}</button>
         </div>
 
-        <nav ref={navRef} data-tour="nav" className="nav-top-bar" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 22 }}>
+        <nav ref={navRef} data-tour="nav" className="nav-top-bar" style={{
+          display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 22, padding: 5, width: "fit-content", maxWidth: "100%", boxSizing: "border-box",
+          background: COLORS.card, border: "1px solid " + COLORS.cardBorder, borderRadius: 18, boxShadow: SHADOW,
+          position: "sticky", top: 10, zIndex: 60
+        }}>
           {NAV.map((item) => item.children ? (
             <div key={item.group} style={{ position: "relative" }}>
               <button onClick={() => setOpenGroup(openGroup === item.group ? null : item.group)}
@@ -1342,7 +1387,7 @@ export default function FinanceTracker() {
                 <ChevronDown size={13} style={{ transform: openGroup === item.group ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
               </button>
               {openGroup === item.group && (
-                <div className="nav-dropdown" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, background: COLORS.card, borderRadius: 14, boxShadow: SHADOW, padding: 6, minWidth: 180, zIndex: 100 }}>
+                <div className="nav-dropdown" style={{ position: "absolute", top: "calc(100% + 10px)", left: 0, background: COLORS.card, border: "1px solid " + COLORS.cardBorder, borderRadius: 16, boxShadow: "0 18px 40px -16px rgba(0,0,0,0.35)", padding: 6, minWidth: 190, zIndex: 100 }}>
                   {item.children.map((c) => (
                     <button key={c.id} onClick={() => { setTab(c.id); setOpenGroup(null); }} style={{
                       display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 9, border: "none",
@@ -1705,7 +1750,9 @@ function Dashboard({ entries, watchPrefs, onSetWatchPrefs, showChecklist, onDism
             <BudgetRangeView entries={entries} groups={groups} budgetType={t} isIncome={t === "income"} maxRows={5}
               budgetedNames={new Set(Object.keys(grp).filter((k) => Object.keys(grp[k]).length > 0))}
               from={watchPrefs.watchFrom} to={watchPrefs.watchTo}
-              onRangeChange={(r) => onSetWatchPrefs({ watchFrom: r.from, watchTo: r.to })} />
+              onRangeChange={(r) => onSetWatchPrefs({ watchFrom: r.from, watchTo: r.to })}
+              pickerOpen={watchPrefs.watchPickerOpen !== false}
+              onTogglePicker={() => onSetWatchPrefs({ watchPickerOpen: watchPrefs.watchPickerOpen === false })} />
           );
         })() : budgetWatch.length === 0 ? (
           <EmptyNote>No budgets set yet — set one in the Budgets tab.</EmptyNote>
@@ -1861,14 +1908,21 @@ function HeroCard({ balance, net }) {
   const animatedBalance = useCountUp(balance, 700);
   return (
     <div data-tour="hero" style={{
-      background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.orangeDark})`,
-      borderRadius: 24, padding: "22px 22px 30px", color: "#fff", position: "relative", overflow: "hidden"
+      background: `radial-gradient(120% 140% at 0% 0%, ${shade(COLORS.orange, 0.18)} 0%, transparent 55%), radial-gradient(90% 120% at 100% 100%, ${shade(COLORS.orange, -0.4)} 0%, transparent 60%), linear-gradient(135deg, ${COLORS.orange}, ${COLORS.accentDeep})`,
+      borderRadius: 26, padding: "24px 24px 34px", color: "#fff", position: "relative", overflow: "hidden",
+      boxShadow: `0 22px 44px -22px ${withAlpha(COLORS.accentDeep, "CC")}, inset 0 1px 0 rgba(255,255,255,0.18)`
     }}>
-      <div style={{ fontSize: 12.5, opacity: 0.9, fontWeight: 600 }}>Total Balance</div>
-      <div className="mono" style={{ fontSize: 34, fontWeight: 800, margin: "6px 0 12px" }}>{fmt(animatedBalance)}</div>
+      <div aria-hidden="true" style={{ position: "absolute", width: 220, height: 220, borderRadius: "50%", right: -70, top: -110, background: "rgba(255,255,255,0.10)" }} />
+      <div aria-hidden="true" style={{ position: "absolute", width: 120, height: 120, borderRadius: "50%", right: 60, top: -70, background: "rgba(255,255,255,0.07)" }} />
+      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 700, opacity: 0.95 }}>
+        <span style={{ width: 26, height: 26, borderRadius: 9, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center" }}><Wallet size={14} /></span>
+        Total Balance
+      </div>
+      <div className="mono" style={{ position: "relative", fontSize: 36, fontWeight: 800, margin: "10px 0 14px", letterSpacing: "-0.02em", textShadow: "0 2px 10px rgba(0,0,0,0.12)" }}>{fmt(animatedBalance)}</div>
       <div style={{
-        display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700,
-        background: "rgba(255,255,255,0.2)", padding: "5px 11px", borderRadius: 999
+        position: "relative", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700,
+        background: "rgba(255,255,255,0.18)", border: "1px solid rgba(255,255,255,0.22)", padding: "5px 11px", borderRadius: 999,
+        backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)"
       }}>
         {positive ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
         {positive ? "+" : "−"}{fmt(Math.abs(net))} this month
@@ -1885,8 +1939,12 @@ function HeroCard({ balance, net }) {
 function QuickAction({ icon, color, label, onClick }) {
   return (
     <button onClick={onClick} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 7, background: "none", border: "none", cursor: "pointer" }}>
-      <span style={{ width: 52, height: 52, borderRadius: "50%", background: color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: SHADOW }}>{icon}</span>
-      <span style={{ fontSize: 11.5, fontWeight: 600, color: COLORS.text }}>{label}</span>
+      <span style={{
+        width: 54, height: 54, borderRadius: 18, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+        background: `linear-gradient(145deg, ${shade(color, 0.12)}, ${shade(color, -0.12)})`,
+        boxShadow: `0 10px 20px -10px ${withAlpha(color, "B3")}, inset 0 1px 0 rgba(255,255,255,0.25)`
+      }}>{icon}</span>
+      <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.text }}>{label}</span>
     </button>
   );
 }
@@ -3467,14 +3525,14 @@ function Insights({ entries, accounts, groups }) {
       }>
         <ResponsiveContainer width="100%" height={220}>
           <ComposedChart data={trend} margin={{ top: 6, right: 10, bottom: 0, left: -14 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
-            <XAxis dataKey="label" stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis tickFormatter={compactTick} stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={44} />
-            <Tooltip contentStyle={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, fontSize: 12 }} formatter={(v) => fmt(v)} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            {chartView !== "expense" && <Bar dataKey="income" name="Income" fill={COLORS.green} radius={[5, 5, 0, 0]} barSize={14} />}
-            {chartView !== "income" && <Bar dataKey="expense" name="Expense" fill={COLORS.rose} radius={[5, 5, 0, 0]} barSize={14} />}
-            {chartView === "flow" && <Line type="monotone" dataKey="net" name="Net" stroke={COLORS.orangeDark} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.orangeDark }} />}
+            <CartesianGrid stroke={COLORS.border} strokeOpacity={0.7} vertical={false} />
+            <XAxis dataKey="label" tick={chartAxisTick()} tickLine={false} axisLine={false} />
+            <YAxis tickFormatter={compactTick} tick={chartAxisTick()} tickLine={false} axisLine={false} width={44} />
+            <Tooltip {...chartTooltipProps()} />
+            <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11.5, paddingTop: 6 }} formatter={(v) => <span style={{ color: COLORS.muted, fontWeight: 600 }}>{v}</span>} />
+            {chartView !== "expense" && <Bar dataKey="income" name="Income" fill={COLORS.chartIncome} radius={[4, 4, 0, 0]} maxBarSize={14} />}
+            {chartView !== "income" && <Bar dataKey="expense" name="Expense" fill={COLORS.chartExpense} radius={[4, 4, 0, 0]} maxBarSize={14} />}
+            {chartView === "flow" && <Line type="monotone" dataKey="net" name="Net" stroke={COLORS.orangeDark} strokeWidth={2} strokeLinecap="round" dot={{ r: 4, fill: COLORS.orangeDark, stroke: COLORS.card, strokeWidth: 2 }} activeDot={{ r: 5, fill: COLORS.orangeDark, stroke: COLORS.card, strokeWidth: 2 }} />}
           </ComposedChart>
         </ResponsiveContainer>
       </SectionCard>
@@ -3540,10 +3598,10 @@ function Insights({ entries, accounts, groups }) {
             <div className="pie-wrap" style={{ position: "relative", width: 170, height: 170 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={80} paddingAngle={2}>
+                  <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={80} paddingAngle={1.5} cornerRadius={4} stroke={COLORS.card} strokeWidth={2}>
                     {pieData.map((d, i) => <Cell key={i} fill={colorFor(d.name)} />)}
                   </Pie>
-                  <Tooltip contentStyle={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, fontSize: 12 }} formatter={(v) => fmt(v)} />
+                  <Tooltip {...chartTooltipProps()} />
                 </PieChart>
               </ResponsiveContainer>
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
@@ -3618,11 +3676,11 @@ function Insights({ entries, accounts, groups }) {
           <SectionCard title="Spending by Day of Week">
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={weekdayData} margin={{ top: 6, right: 6, bottom: 0, left: -8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
-                <XAxis dataKey="label" stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis tickFormatter={compactTick} stroke={COLORS.muted} fontSize={11} tickLine={false} axisLine={false} width={40} />
-                <Tooltip contentStyle={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, fontSize: 12 }} formatter={(v) => fmt(v)} />
-                <Bar dataKey="value" fill={COLORS.orange} radius={[5, 5, 0, 0]} />
+                <CartesianGrid stroke={COLORS.border} strokeOpacity={0.7} vertical={false} />
+                <XAxis dataKey="label" tick={chartAxisTick()} tickLine={false} axisLine={false} />
+                <YAxis tickFormatter={compactTick} tick={chartAxisTick()} tickLine={false} axisLine={false} width={40} />
+                <Tooltip {...chartTooltipProps()} />
+                <Bar dataKey="value" name="Spent" fill={COLORS.orange} radius={[4, 4, 0, 0]} maxBarSize={24} />
               </BarChart>
             </ResponsiveContainer>
           </SectionCard>
@@ -3782,7 +3840,7 @@ function BudgetCard({ title, subtitle, dotColor, lim, spent, isGoal, rangeLabel,
 // "Custom" view on the Budgets page: pick any From/To dates and see what was
 // spent (or earned) per category/group in that window, for viewing only — no
 // limits are applied to it. Categories that have a budget are tagged.
-function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome, from: fromProp, to: toProp, onRangeChange, maxRows }) {
+function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome, from: fromProp, to: toProp, onRangeChange, maxRows, pickerOpen, onTogglePicker }) {
   // Uncontrolled on the Budgets page; the dashboard passes from/to/onRangeChange
   // so its chosen range is saved with the rest of the user's data.
   const [fromState, setFromState] = useState(() => defaultCustomRange().from);
@@ -3819,10 +3877,28 @@ function BudgetRangeView({ entries, groups, budgetType, budgetedNames, isIncome,
 
   return (
     <div>
-      <CustomRangePicker from={from} to={to} onChange={setRange} />
-      <div style={{ fontSize: 11, color: COLORS.mutedLight, margin: "10px 0 14px" }}>
-        For viewing only — this shows what you {isIncome ? "earned" : "spent"} in these dates and doesn't compare against your limits.
-      </div>
+      {onTogglePicker && (
+        // Collapsible date picker (dashboard): hide it once the range is set and
+        // keep just the dates on show, with a button to bring the picker back.
+        <button onClick={onTogglePicker} aria-expanded={!!pickerOpen} style={{
+          display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", cursor: "pointer",
+          background: COLORS.bg, border: "1px solid " + COLORS.border, borderRadius: 12, padding: "9px 12px",
+          marginBottom: pickerOpen ? 10 : 14, color: COLORS.text
+        }}>
+          <CalendarDays size={15} style={{ color: COLORS.orangeDark, flexShrink: 0 }} />
+          <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{range.label}</span>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: COLORS.muted, flexShrink: 0 }}>{pickerOpen ? "Hide dates" : "Change dates"}</span>
+          <ChevronDown size={14} style={{ color: COLORS.muted, flexShrink: 0, transform: pickerOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+        </button>
+      )}
+      {(!onTogglePicker || pickerOpen) && (
+        <>
+          <CustomRangePicker from={from} to={to} onChange={setRange} />
+          <div style={{ fontSize: 11, color: COLORS.mutedLight, margin: "10px 0 14px" }}>
+            For viewing only — this shows what you {isIncome ? "earned" : "spent"} in these dates and doesn't compare against your limits.
+          </div>
+        </>
+      )}
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
         <div>
           <div style={{ fontSize: 11, color: COLORS.mutedLight, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -5007,7 +5083,7 @@ function Settings({ theme, onSetTheme, profile, onSetProfile, categories, entrie
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 12 }}>
           <div style={{ padding: "10px 18px", borderRadius: 12, background: COLORS.orange, color: "#fff", fontWeight: 700, fontSize: 13.5 }}>Primary Button</div>
           <div style={{ padding: "10px 16px", borderRadius: 999, background: COLORS.orangeLight, color: COLORS.orangeDark, fontWeight: 700, fontSize: 12.5 }}>Active Pill</div>
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.orangeDark})` }} />
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: `linear-gradient(135deg, ${COLORS.orange}, ${COLORS.accentDeep})` }} />
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
           <div style={{ padding: "10px 16px", borderRadius: 999, background: COLORS.blueLight, color: COLORS.blue, fontWeight: 700, fontSize: 12.5, border: "1px solid " + COLORS.blue }}>Secondary Pill</div>
@@ -5360,7 +5436,7 @@ function StatRow({ icon, color, label, value }) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 2px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span style={{ width: 32, height: 32, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>{icon}</span>
+        <span style={{ width: 34, height: 34, borderRadius: 11, background: withAlpha(color, "1F"), display: "flex", alignItems: "center", justifyContent: "center", color }}>{icon}</span>
         <span style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</span>
       </div>
       <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{value}</span>
@@ -5370,9 +5446,9 @@ function StatRow({ icon, color, label, value }) {
 
 function SummaryCard({ icon, label, value, color, sub }) {
   return (
-    <div style={{ background: COLORS.bg, borderRadius: 14, padding: "12px 13px", minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLORS.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8, fontWeight: 700 }}>
-        <span style={{ color }}>{icon}</span>{label}
+    <div style={{ background: COLORS.raised, border: "1px solid " + COLORS.cardBorder, borderRadius: 16, padding: "13px 14px", minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, color: COLORS.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10, fontWeight: 800 }}>
+        <span style={{ width: 24, height: 24, borderRadius: 8, background: withAlpha(color, "1F"), color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{icon}</span>{label}
       </div>
       <div className="mono" style={{ fontSize: "clamp(14px, 4.4vw, 17px)", fontWeight: 800, color: COLORS.text, overflowWrap: "anywhere", lineHeight: 1.25 }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
@@ -5383,7 +5459,7 @@ function SummaryCard({ icon, label, value, color, sub }) {
 function SectionCard({ title, icon, right, children, collapsible, open, onToggle, tour }) {
   if (collapsible) {
     return (
-      <div data-tour={tour} className="section-card-collapsible" style={{ background: COLORS.card, borderRadius: 20, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+      <div data-tour={tour} className="section-card-collapsible" style={{ background: COLORS.card, borderRadius: 20, border: "1px solid " + COLORS.cardBorder, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
         <button type="button" className="section-card-head" onClick={onToggle} aria-expanded={!!open} style={{
           display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "none", cursor: "pointer",
           padding: "16px 18px", textAlign: "left", color: COLORS.muted
@@ -5398,9 +5474,9 @@ function SectionCard({ title, icon, right, children, collapsible, open, onToggle
     );
   }
   return (
-    <div data-tour={tour} className="section-card" style={{ background: COLORS.card, borderRadius: 20, padding: 18, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 }}>
+    <div data-tour={tour} className="section-card" style={{ background: COLORS.card, borderRadius: 20, padding: 18, border: "1px solid " + COLORS.cardBorder, boxShadow: SHADOW, transition: "background-color .3s ease" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 800 }}>
           {icon}{title}
         </div>
         {right}
@@ -5803,11 +5879,16 @@ function MoneyInput({ value, onChange, allowNegative, placeholder = "0.00", styl
 }
 
 function FieldLabel({ children }) {
-  return <div style={{ fontSize: 11, color: COLORS.muted, marginBottom: 5, fontWeight: 600 }}>{children}</div>;
+  return <div style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 6, fontWeight: 700 }}>{children}</div>;
 }
 
 function EmptyNote({ children }) {
-  return <div style={{ padding: "16px 4px", color: COLORS.mutedLight, fontSize: 13 }}>{children}</div>;
+  return (
+    <div style={{
+      padding: "18px 16px", color: COLORS.muted, fontSize: 13, textAlign: "center", lineHeight: 1.5,
+      border: "1px dashed " + COLORS.border, borderRadius: 14, background: withAlpha(COLORS.bg, "99")
+    }}>{children}</div>
+  );
 }
 
 function SelectBox({ value, onChange, children }) {
@@ -5826,15 +5907,28 @@ function GlobalStyle() {
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
       * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-      .mono { font-variant-numeric: tabular-nums; }
+      .mono { font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+      body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+      * { scrollbar-width: thin; scrollbar-color: ${COLORS.border} transparent; }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-thumb { background: ${COLORS.border}; border-radius: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
       ::selection { background: ${COLORS.orangeLight}; }
       input, select {
-        font-family: inherit; background: ${COLORS.card}; border: 1px solid ${COLORS.border}; color: ${COLORS.text};
-        border-radius: 10px; padding: 9px 11px; font-size: 14px; outline: none; transition: border-color .15s, background-color .2s ease, color .2s ease;
+        font-family: inherit; background: ${COLORS.inputBg}; border: 1px solid ${COLORS.border}; color: ${COLORS.text};
+        border-radius: 12px; padding: 9px 11px; font-size: 14px; outline: none;
+        transition: border-color .15s, box-shadow .15s, background-color .2s ease, color .2s ease;
       }
-      input:focus, select:focus { border-color: ${COLORS.orange}; }
+      input:hover, select:hover { border-color: ${shade(COLORS.border, -0.12)}; }
+      input:focus, select:focus { border-color: ${COLORS.orange}; background: ${COLORS.card}; box-shadow: 0 0 0 3px ${withAlpha(COLORS.orange, "2E")}; }
+      input:disabled, select:disabled { opacity: .6; cursor: not-allowed; }
+      select {
+        appearance: none; -webkit-appearance: none; padding-right: 30px !important; cursor: pointer;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='${encodeURIComponent(COLORS.muted)}' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+        background-repeat: no-repeat; background-position: right 10px center;
+      }
       input::placeholder { color: ${COLORS.mutedLight}; }
-      button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid ${COLORS.orange}; outline-offset: 2px; }
+      button:focus-visible { outline: 2px solid ${COLORS.orange}; outline-offset: 2px; }
       input[type="checkbox"] { accent-color: ${COLORS.orange}; }
       button {
         transition: opacity .15s ease, transform .12s cubic-bezier(0.4,0,0.2,1), box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease;
